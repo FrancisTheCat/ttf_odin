@@ -597,7 +597,6 @@ get_render_shape :: proc(shape: Shape, allocator := context.allocator) -> (rende
 	return
 }
 
-// broken, don't use this (could revisit this after splitting beziers into monotonic parts tho)
 get_intersections_simd :: proc(
 	shape:                    Render_Shape,
 	y:                        f32,
@@ -787,11 +786,19 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 
 Y_SAMPLES :: 4
 
+get_bitmap_size :: proc(font: Font, shape: Shape, font_size: f32) -> (w: int, h: int) {
+	scale := font_size / f32(font.units_per_em)
+	w      = int((shape.max.x - shape.min.x) * scale) + 2
+	h      = int((shape.max.y - shape.min.y) * scale) + 2
+	return
+}
+
 render_shape_bitmap :: proc(
-	shape:  Shape,
-	scale:  f32,
-	pixels: []u8,
-	stride: int = -1,
+	font:      Font,
+	shape:     Shape,
+	font_size: f32,
+	pixels:    []u8,
+	stride:    int = -1,
 ) {
 	stride := stride
 
@@ -800,8 +807,8 @@ render_shape_bitmap :: proc(
 		i = make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 	}
 
-	w := int((shape.max.x - shape.min.x) * scale) + 2
-	h := int((shape.max.y - shape.min.y) * scale) + 2
+	scale := font_size / f32(font.units_per_em)
+	w, h  := get_bitmap_size(font, shape, font_size)
 
 	if stride <= 0 {
 		stride = w
@@ -860,20 +867,19 @@ render_shape_bitmap :: proc(
 }
 
 main :: proc() {
-	SCALE :: 0.1
+	FONT_SIZE :: 18
 
 	// font   := load(#load("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")) or_else panic("Failed to load font")
-	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf")) or_else panic("Failed to load font")
-	font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf")) or_else panic("Failed to load font")
+	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf"              )) or_else panic("Failed to load font")
+	font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf"          )) or_else panic("Failed to load font")
 	glyph  := get_codepoint_glyph(font, '?')
 	shape  := glyph_get_shape(font, glyph)
-	w      := int((shape.max.x - shape.min.x) * SCALE) + 2
-	h      := int((shape.max.y - shape.min.y) * SCALE) + 2
+	w, h   := get_bitmap_size(font, shape, FONT_SIZE)
 	pixels := make([]u8, w * h)
 
 	start_fast := time.now()
 
-	render_shape_bitmap(shape, SCALE, pixels)
+	render_shape_bitmap(font, shape, FONT_SIZE, pixels)
 
 	fmt.println("time:", time.since(start_fast))
 	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
