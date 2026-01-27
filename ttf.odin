@@ -348,9 +348,25 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 					prev = coords[current]
 				} else {
 					defer {
-						bezier := &beziers[len(beziers) - 1]
+						bezier := pop(&beziers)
 						if bezier.p0.y > bezier.p2.y {
 							bezier.p0, bezier.p2 = bezier.p2, bezier.p0
+						}
+						denom := bezier.p0.y - 2 * bezier.p1.y + bezier.p2.y
+						if abs(denom) < 0.0001 {
+							append(&beziers, bezier)
+						} else {
+							t_split := (bezier.p0.y - bezier.p1.y) / denom
+							if 0 < t_split && t_split < 1 {
+								q0 := math.lerp(bezier.p0, bezier.p1, t_split)
+								q1 := math.lerp(bezier.p1, bezier.p2, t_split)
+								s  := math.lerp(q0,        q1,        t_split)
+
+								append(&beziers, Segment_Bezier { bezier.p0, q0, s, })
+								append(&beziers, Segment_Bezier { bezier.p2, q1, s, })
+							} else {
+								append(&beziers, bezier)
+							}
 						}
 					}
 
@@ -381,6 +397,10 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 		}
 	} else {
 		unimplemented()
+	}
+
+	when ODIN_DEBUG do for bezier in beziers {
+		assert(bezier.p0.y <= bezier.p2.y)
 	}
 
 	// Build acceleration structure
@@ -841,7 +861,7 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	switch font.cmap_record.encodingId {
 	case 3:
 		subtable := (^Cmap_Subtable_Format_4)(&font.data[font.cmap_offset + int(font.cmap_record.offset)])
-		assert(subtable.format == 3)
+		assert(subtable.format == 4)
 
 		seg_count := u32(subtable.segCountX2 / 2)
 
@@ -880,7 +900,7 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 		}
 	case 4:
 		subtable := (^Cmap_Subtable_Format_12)(&font.data[font.cmap_offset + int(font.cmap_record.offset)])
-		assert(subtable.format == 4)
+		assert(subtable.format == 12)
 		#no_bounds_check groups := subtable.groups[:subtable.numGroups]
 		group_index, found      := slice.binary_search_by(groups, codepoint, proc(group: Sequential_Map_Group, codepoint: u32) -> slice.Ordering {
 			switch {
@@ -906,7 +926,7 @@ main :: proc() {
 	font   := load(#load("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")) or_else panic("Failed to load font")
 	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf")) or_else panic("Failed to load font")
 	// font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf")) or_else panic("Failed to load font")
-	glyph  := get_codepoint_glyph(font, '')
+	glyph  := get_codepoint_glyph(font, '')
 	shape  := glyph_get_shape(font, glyph)
 	w      := int(shape.max.x - shape.min.x)
 	h      := int(shape.max.y - shape.min.y)
@@ -990,7 +1010,7 @@ main :: proc() {
 						hits += i[y_sample] & 1
 					}
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * f32(hits) / (Y_SAMPLES * X_SAMPLES))
+				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(f32(hits) / (Y_SAMPLES * X_SAMPLES), 1 / 2.2))
 			}
 		}
 	}
@@ -1037,7 +1057,7 @@ main :: proc() {
 						hits += i[y_sample] & 1
 					}
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * f32(hits) / (Y_SAMPLES * X_SAMPLES))
+				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(f32(hits) / (Y_SAMPLES * X_SAMPLES), 1 / 2.2))
 			}
 		}
 	}
