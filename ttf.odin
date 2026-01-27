@@ -478,7 +478,7 @@ get_intersections :: proc(
 
 	for linear in shape.linears[min_linear:max_linear] {
 		if !(linear.a.y <= y && y < linear.b.y) {
-    		continue
+			continue
 	    }
 
 		t  := (y - linear.a.y) / (linear.b.y - linear.a.y)
@@ -795,9 +795,7 @@ main :: proc() {
 	h      := int(shape.max.y - shape.min.y)
 	pixels := make([]u8, w * h)
 
-	Y_SAMPLES :: 4
-	X_SAMPLES :: 4
-
+	Y_SAMPLES :: 32
 	intersections: [Y_SAMPLES][]f32
 	for &i in intersections {
 		i = make([]f32, len(shape.linears) + len(shape.beziers))
@@ -819,17 +817,31 @@ main :: proc() {
 
 			i: [Y_SAMPLES]int
 			for x in 0 ..< w {
-				hits: int
+				coverage: f32
 				for y_sample in 0 ..< Y_SAMPLES {
-					for x_sample in 0 ..< X_SAMPLES {
-						x := f32(x) + f32(x_sample) / X_SAMPLES + shape.min.x - 0.5
-						for i[y_sample] < n[y_sample] && x > intersections[y_sample][i[y_sample]] {
-							i[y_sample] += 1
+					start_x := f32(x)     + shape.min.x - 0.5
+					end_x   := f32(x + 1) + shape.min.x - 0.5
+					prev    := start_x
+
+					for (
+					    i[y_sample] < n[y_sample] &&
+					    intersections[y_sample][i[y_sample]] < end_x
+					) {
+						ix := intersections[y_sample][i[y_sample]]
+
+						if i[y_sample] & 1 == 1 {
+							coverage += ix - prev
 						}
-						hits += i[y_sample] & 1
+
+						prev         = ix
+						i[y_sample] += 1
+					}
+
+					if i[y_sample] & 1 == 1 {
+						coverage += end_x - prev
 					}
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(f32(hits) / (Y_SAMPLES * X_SAMPLES), 1 / 2.2))
+				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
 			}
 		}
 	}
@@ -863,17 +875,31 @@ main :: proc() {
 
 			i: [Y_SAMPLES]int
 			for x in 0 ..< w {
-				hits: int
+				coverage: f32
 				for y_sample in 0 ..< Y_SAMPLES {
-					for x_sample in 0 ..< X_SAMPLES {
-						x := f32(x) + f32(x_sample) / X_SAMPLES + shape.min.x - 0.5
-						for i[y_sample] < n[y_sample] && x > intersections[y_sample][i[y_sample]] {
-							i[y_sample] += 1
+					start_x := f32(x)     + shape.min.x - 0.5
+					end_x   := f32(x + 1) + shape.min.x - 0.5
+					prev    := start_x
+
+					for (
+					    i[y_sample] < n[y_sample] &&
+					    intersections[y_sample][i[y_sample]] < end_x
+					) {
+						ix := intersections[y_sample][i[y_sample]]
+
+						if i[y_sample] & 1 == 1 {
+							coverage += ix - prev
 						}
-						hits += i[y_sample] & 1
+
+						prev         = ix
+						i[y_sample] += 1
+					}
+
+					if i[y_sample] & 1 == 1 {
+						coverage += end_x - prev
 					}
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(f32(hits) / (Y_SAMPLES * X_SAMPLES), 1 / 2.2))
+				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
 			}
 		}
 	}
@@ -910,17 +936,31 @@ main :: proc() {
 
 			i: [Y_SAMPLES]int
 			for x in 0 ..< w {
-				hits: int
+				coverage: f32
 				for y_sample in 0 ..< Y_SAMPLES {
-					for x_sample in 0 ..< X_SAMPLES {
-						x := f32(x) + f32(x_sample) / X_SAMPLES + shape.min.x - 0.5
-						for i[y_sample] < n[y_sample] && x > intersections[y_sample][i[y_sample]] {
-							i[y_sample] += 1
+					start_x := f32(x)     + shape.min.x - 0.5
+					end_x   := f32(x + 1) + shape.min.x - 0.5
+					prev    := start_x
+
+					for (
+					    i[y_sample] < n[y_sample] &&
+					    intersections[y_sample][i[y_sample]] < end_x
+					) {
+						ix := intersections[y_sample][i[y_sample]]
+
+						if i[y_sample] & 1 == 1 {
+							coverage += ix - prev
 						}
-						hits += i[y_sample] & 1
+
+						prev         = ix
+						i[y_sample] += 1
+					}
+
+					if i[y_sample] & 1 == 1 {
+						coverage += end_x - prev
 					}
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(f32(hits) / (Y_SAMPLES * X_SAMPLES), 1 / 2.2))
+				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
 			}
 		}
 	}
