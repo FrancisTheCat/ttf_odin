@@ -358,12 +358,19 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 						} else {
 							t_split := (bezier.p0.y - bezier.p1.y) / denom
 							if 0 < t_split && t_split < 1 {
+								assert((bezier.p1.y > bezier.p2.y) != (bezier.p1.y < bezier.p0.y))
+
 								q0 := math.lerp(bezier.p0, bezier.p1, t_split)
 								q1 := math.lerp(bezier.p1, bezier.p2, t_split)
 								s  := math.lerp(q0,        q1,        t_split)
 
-								append(&beziers, Segment_Bezier { bezier.p0, q0, s, })
-								append(&beziers, Segment_Bezier { bezier.p2, q1, s, })
+								if bezier.p1.y > bezier.p2.y {
+									append(&beziers, Segment_Bezier { bezier.p0, q0, s, })
+									append(&beziers, Segment_Bezier { bezier.p2, q1, s, })
+								} else {
+									append(&beziers, Segment_Bezier { s, q0, bezier.p0, })
+									append(&beziers, Segment_Bezier { s, q1, bezier.p2, })
+								}
 							} else {
 								append(&beziers, bezier)
 							}
@@ -400,7 +407,8 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 	}
 
 	when ODIN_DEBUG do for bezier in beziers {
-		assert(bezier.p0.y <= bezier.p2.y)
+		assert(bezier.p0.y <= bezier.p1.y)
+		assert(bezier.p1.y <= bezier.p2.y)
 	}
 
 	// Build acceleration structure
@@ -469,122 +477,42 @@ get_intersections :: proc(
 	max_bezier := max_bezier >= 0 ? max_bezier : len(shape.beziers)
 
 	for linear in shape.linears[min_linear:max_linear] {
-		if (
-	      linear.b.y >  y &&
-	      linear.a.y <= y
-	    ) {
-			t  := (y - linear.a.y) / (linear.b.y - linear.a.y)
-			vx := (1 - t) * linear.a.x + t * linear.b.x
-
-			intersections[n_intersections] = vx
-			n_intersections               += 1
+		if !(linear.a.y <= y && y < linear.b.y) {
+    		continue
 	    }
+
+		t  := (y - linear.a.y) / (linear.b.y - linear.a.y)
+		vx := (1 - t) * linear.a.x + t * linear.b.x
+
+		intersections[n_intersections] = vx
+		n_intersections               += 1
 	}
 
 	for bezier in shape.beziers[min_bezier:max_bezier] {
+		if !(bezier.p0.y <= y && y < bezier.p2.y) {
+			continue
+		}
+
 		a := bezier.p0.y - 2 * bezier.p1.y + bezier.p2.y
 		b := -2 * bezier.p0.y + 2 * bezier.p1.y
 		c := bezier.p0.y - y
 
-		t, vx, dy: f32
+		t: f32
 		if abs(a) < 0.0001 {
-			if (
-				bezier.p2.y >  y &&
-				bezier.p0.y <= y
-			) {
-				t  = (y - bezier.p0.y) / (bezier.p2.y - bezier.p0.y)
-				vx = (1 - t) * ((1 - t) * bezier.p0.x + t * bezier.p1.x) + t * ((1 - t) * bezier.p1.x + t * bezier.p2.x)
-
-				intersections[n_intersections] = vx
-				n_intersections               += 1
-			}
-			continue
+			t = (y - bezier.p0.y) / (bezier.p2.y - bezier.p0.y)
+	    } else {
+			t = (-b + math.sqrt(b * b - 4 * a * c)) / (2 * a)
 	    }
 
-		determinant := b * b - 4 * a * c
-		if determinant < 0 {
-			continue
-		}
-
-		@(require_results)
-		bezier_curve_intersection :: proc(
-			bezier: Segment_Bezier,
-			y, dy:  f32,
-		) -> bool {
-			// "U"
-			if bezier.p1.y < bezier.p0.y {
-				if dy < 0 {
-					if bezier.p0.y > y {
-						return true
-					}
-				} else {
-					if bezier.p2.y > y {
-						return true
-					}
-				}
-			// "^"
-			} else if bezier.p1.y >= bezier.p2.y {
-				if dy > 0 {
-					if bezier.p0.y <= y {
-						return true
-					}
-				} else {
-					if bezier.p2.y <= y {
-						return true
-					}
-				}
-			// "/"
-			} else {
-				if (
-					bezier.p2.y >  y &&
-					bezier.p0.y <= y
-				) {
-					return true
-				}
-			}
-
-			return false
-		}
-
-		root := math.sqrt(determinant)
-
-		t  = (-b + root) / (2 * a)
-		vx = math.lerp(math.lerp(bezier.p0.x, bezier.p1.x, t), math.lerp(bezier.p1.x, bezier.p2.x, t), t)
-		dy = 2 * (1 - t) * (bezier.p1.y - bezier.p0.y) + 2 * t * (bezier.p2.y - bezier.p1.y)
-
-		if abs(dy) < 0.0001 {
-			if y == bezier.p0.y {
-				intersections[n_intersections] = bezier.p0.x 
-				n_intersections               += 1
-			}
-			continue
-		}
-
-		if (
-			0 <= t && t <= 1 &&
-			bezier_curve_intersection(bezier, y, dy)
-		) {
-			intersections[n_intersections] = vx
-			n_intersections               += 1
-		}
-
-		t  = (-b - root) / (2 * a)
-		vx = math.lerp(math.lerp(bezier.p0.x, bezier.p1.x, t), math.lerp(bezier.p1.x, bezier.p2.x, t), t)
-		dy = 2 * (1 - t) * (bezier.p1.y - bezier.p0.y) + 2 * t * (bezier.p2.y - bezier.p1.y)
-
-		if (
-			0 <= t && t <= 1 &&
-			bezier_curve_intersection(bezier, y, dy)
-		) {
-			intersections[n_intersections] = vx
-			n_intersections               += 1
-		}
+		vx                            := math.lerp(math.lerp(bezier.p0.x, bezier.p1.x, t), math.lerp(bezier.p1.x, bezier.p2.x, t), t)
+		intersections[n_intersections] = vx
+		n_intersections               += 1
 	}
 
 	return
 }
 
-RENDER_CHUNK_SIZE :: 4
+RENDER_CHUNK_SIZE :: 8
 
 @(require_results)
 get_render_shape :: proc(shape: Shape, allocator := context.allocator) -> (render_shape: Render_Shape) {
@@ -715,105 +643,40 @@ get_intersections_simd :: proc(
 	}
 
 	for chunk in start_bezier^ ..< end_bezier^ {
-		offset := chunk * RENDER_CHUNK_SIZE
+		N           :: RENDER_CHUNK_SIZE
 
-		N :: RENDER_CHUNK_SIZE
-		p0x    := (^#simd[N]f32)(&shape.beziers.p0.x[offset])^
-		p0y    := (^#simd[N]f32)(&shape.beziers.p0.y[offset])^
-		p1x    := (^#simd[N]f32)(&shape.beziers.p1.x[offset])^
-		p1y    := (^#simd[N]f32)(&shape.beziers.p1.y[offset])^
-		p2x    := (^#simd[N]f32)(&shape.beziers.p2.x[offset])^
-		p2y    := (^#simd[N]f32)(&shape.beziers.p2.y[offset])^
-		y      := ( #simd[N]f32)(y)
+		offset      := chunk * RENDER_CHUNK_SIZE
 
-		a := p0y - 2 * p1y + p2y
-		b := -2 * p0y + 2 * p1y
-		c := p0y - y
+		p0x         := (^#simd[N]f32)(&shape.beziers.p0.x[offset])^
+		p0y         := (^#simd[N]f32)(&shape.beziers.p0.y[offset])^
+		p1x         := (^#simd[N]f32)(&shape.beziers.p1.x[offset])^
+		p1y         := (^#simd[N]f32)(&shape.beziers.p1.y[offset])^
+		p2x         := (^#simd[N]f32)(&shape.beziers.p2.x[offset])^
+		p2y         := (^#simd[N]f32)(&shape.beziers.p2.y[offset])^
+		y           := ( #simd[N]f32)(y)
 
-		determinant := b * b - 4 * a * c
-		root        := simd.sqrt(determinant)
+		a           := p0y - 2 * p1y + p2y
+		b           := -2 * p0y + 2 * p1y
+		c           := p0y - y
 
 		linear_mask := simd.lanes_lt(simd.abs(a), 0.0001)
+		hit_mask    := simd.lanes_gt(p2y, y) & simd.lanes_le(p0y, y)
 
-		{
-			hit_mask := simd.lanes_gt(p2y, y) & simd.lanes_le(p0y, y)
-			t        := (y - p0y) / (p2y - p0y)
-			vx       := (1 - t) * p0x + t * p2x
+		t_linear    := (y - p0y) / (p2y - p0y)
+		t_bezier    := (-b + simd.sqrt(b * b - 4 * a * c)) / (2 * a)
 
-			hits   := simd.to_array(hit_mask & linear_mask)
-			values := simd.to_array(vx)
+		t           := simd.select(linear_mask, t_linear, t_bezier)
+		vx          := math.lerp(math.lerp(p0x, p1x, t), math.lerp(p1x, p2x, t), t)
+		values      := simd.to_array(vx)
+		hits        := simd.to_array(hit_mask)
 
-			for i in 0 ..< N {
-				if hits[i] == 0 {
-					continue
-				}
-
-				intersections[n_intersections] = values[i]
-				n_intersections               += 1
+		for i in 0 ..< N {
+			if hits[i] == 0 {
+				continue
 			}
-		}
 
-		// SIMD version of bezier_curve_intersection
-		@(require_results)
-		bezier_intersection_mask :: proc(y0, y1, y2, y, dy: #simd[N]f32) -> #simd[N]u32 {
-			u_mask := simd.lanes_lt(y1, y0)
-			u_hits := (simd.lanes_lt(dy, 0) & simd.lanes_gt(y0, y)) | (simd.lanes_ge(dy, 0) & simd.lanes_gt(y2, y))
-
-			not_u := simd.lanes_ge(y1, y0)
-
-			caret_mask := not_u & simd.lanes_ge(y1, y2)
-			caret_hits := (simd.lanes_gt(dy, 0) & simd.lanes_le(y0, y)) | (simd.lanes_le(dy, 0) & simd.lanes_le(y2, y))
-
-			slash_mask := not_u & simd.lanes_lt(y1, y2)
-			slash_hits := simd.lanes_gt(y2, y) & simd.lanes_le(y0, y)
-
-			return (
-				(u_mask     & u_hits    ) |
-				(caret_mask & caret_hits) |
-				(slash_mask & slash_hits)
-			)
-		}
-
-		{
-			t  := (-b + root) / (2 * a)
-			vx := math.lerp(math.lerp(p0x, p1x, t), math.lerp(p1x, p2x, t), t)
-			dy := 2 * (1 - t) * (p1y - p0y) + 2 * t * (p2y - p1y)
-
-			hit_mask := bezier_intersection_mask(p0y, p1y, p2y, y, dy) & ~linear_mask
-			hit_mask &= simd.lanes_le((#simd[N]f32)(0), t) & simd.lanes_le(t, 1)
-
-			hits   := simd.to_array(hit_mask)
-			values := simd.to_array(vx)
-
-			for i in 0 ..< N {
-				if hits[i] == 0 {
-					continue
-				}
-
-				intersections[n_intersections] = values[i]
-				n_intersections               += 1
-			}
-		}
-
-		{
-			t  := (-b - root) / (2 * a)
-			vx := math.lerp(math.lerp(p0x, p1x, t), math.lerp(p1x, p2x, t), t)
-			dy := 2 * (1 - t) * (p1y - p0y) + 2 * t * (p2y - p1y)
-
-			hit_mask := bezier_intersection_mask(p0y, p1y, p2y, y, dy) & ~linear_mask
-			hit_mask &= simd.lanes_le((#simd[N]f32)(0), t) & simd.lanes_le(t, 1)
-
-			hits   := simd.to_array(hit_mask)
-			values := simd.to_array(vx)
-
-			for i in 0 ..< N {
-				if hits[i] == 0 {
-					continue
-				}
-
-				intersections[n_intersections] = values[i]
-				n_intersections               += 1
-			}
+			intersections[n_intersections] = values[i]
+			n_intersections               += 1
 		}
 	}
 	return
