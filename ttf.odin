@@ -785,187 +785,96 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	return 0
 }
 
-main :: proc() {
-	font   := load(#load("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")) or_else panic("Failed to load font")
-	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf")) or_else panic("Failed to load font")
-	// font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf")) or_else panic("Failed to load font")
-	glyph  := get_codepoint_glyph(font, '')
-	shape  := glyph_get_shape(font, glyph)
-	w      := int(shape.max.x - shape.min.x)
-	h      := int(shape.max.y - shape.min.y)
-	pixels := make([]u8, w * h)
+Y_SAMPLES :: 4
 
-	Y_SAMPLES :: 32
+render_shape_bitmap :: proc(
+	shape:  Shape,
+	scale:  f32,
+	pixels: []u8,
+	stride: int = -1,
+) {
+	stride := stride
+
 	intersections: [Y_SAMPLES][]f32
 	for &i in intersections {
-		i = make([]f32, len(shape.linears) + len(shape.beziers))
+		i = make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 	}
 
-	start_naive := time.now()
-	{
-		for y in 0 ..< h {
-			n: [Y_SAMPLES]int
+	w := int((shape.max.x - shape.min.x) * scale) + 2
+	h := int((shape.max.y - shape.min.y) * scale) + 2
+
+	if stride <= 0 {
+		stride = w
+	}
+
+	assert(len(pixels) >= stride * h)
+
+	start_linear, end_linear: [Y_SAMPLES]int
+	start_bezier, end_bezier: [Y_SAMPLES]int
+
+	for y in 0 ..< h {
+		n: [Y_SAMPLES]int
+		for y_sample in 0 ..< Y_SAMPLES {
+			render_y   := (f32(y) + f32(y_sample) / Y_SAMPLES - 0.5) / scale + shape.min.y
+			n[y_sample] = get_intersections_fast(
+				shape,
+				render_y,
+				intersections[y_sample],
+				&start_linear[y_sample],
+				&end_linear[y_sample],
+				&start_bezier[y_sample],
+				&end_bezier[y_sample],
+			)
+			slice.sort(intersections[y_sample][:n[y_sample]])
+		}
+
+		i: [Y_SAMPLES]int
+		for x in 0 ..< w {
+			coverage: f32
 			for y_sample in 0 ..< Y_SAMPLES {
-				render_y   := f32(y) + f32(y_sample) / Y_SAMPLES + shape.min.y - 0.5
-				n[y_sample] = get_intersections(
-					shape,
-					render_y,
-					intersections[y_sample],
-				)
-				slice.sort(intersections[y_sample][:n[y_sample]])
-			}
+				start_x := (f32(x)     - 0.5) / scale + shape.min.x
+				end_x   := (f32(x + 1) - 0.5) / scale + shape.min.x
+				prev    := start_x
 
-			i: [Y_SAMPLES]int
-			for x in 0 ..< w {
-				coverage: f32
-				for y_sample in 0 ..< Y_SAMPLES {
-					start_x := f32(x)     + shape.min.x - 0.5
-					end_x   := f32(x + 1) + shape.min.x - 0.5
-					prev    := start_x
-
-					for (
-					    i[y_sample] < n[y_sample] &&
-					    intersections[y_sample][i[y_sample]] < end_x
-					) {
-						ix := intersections[y_sample][i[y_sample]]
-
-						if i[y_sample] & 1 == 1 {
-							coverage += ix - prev
-						}
-
-						prev         = ix
-						i[y_sample] += 1
-					}
+				for (
+				    i[y_sample] < n[y_sample] &&
+				    intersections[y_sample][i[y_sample]] < end_x
+				) {
+					ix := intersections[y_sample][i[y_sample]]
 
 					if i[y_sample] & 1 == 1 {
-						coverage += end_x - prev
+						coverage += ix - prev
 					}
+
+					prev         = ix
+					i[y_sample] += 1
 				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
+
+				if i[y_sample] & 1 == 1 {
+					coverage += end_x - prev
+				}
 			}
+			pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(scale * coverage / Y_SAMPLES, 1 / 2.2))
 		}
 	}
-	fmt.println("naive:", time.since(start_naive))
+}
 
-	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+main :: proc() {
+	SCALE :: 0.1
 
-	slice.zero(pixels)
+	// font   := load(#load("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")) or_else panic("Failed to load font")
+	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf")) or_else panic("Failed to load font")
+	font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf")) or_else panic("Failed to load font")
+	glyph  := get_codepoint_glyph(font, '?')
+	shape  := glyph_get_shape(font, glyph)
+	w      := int((shape.max.x - shape.min.x) * SCALE) + 2
+	h      := int((shape.max.y - shape.min.y) * SCALE) + 2
+	pixels := make([]u8, w * h)
 
 	start_fast := time.now()
 
-	{
-		start_linear, end_linear: [Y_SAMPLES]int
-		start_bezier, end_bezier: [Y_SAMPLES]int
+	render_shape_bitmap(shape, SCALE, pixels)
 
-		for y in 0 ..< h {
-			n: [Y_SAMPLES]int
-			for y_sample in 0 ..< Y_SAMPLES {
-				render_y   := f32(y) + f32(y_sample) / Y_SAMPLES + shape.min.y - 0.5
-				n[y_sample] = get_intersections_fast(
-					shape,
-					render_y,
-					intersections[y_sample],
-					&start_linear[y_sample],
-					&end_linear[y_sample],
-					&start_bezier[y_sample],
-					&end_bezier[y_sample],
-				)
-				slice.sort(intersections[y_sample][:n[y_sample]])
-			}
-
-			i: [Y_SAMPLES]int
-			for x in 0 ..< w {
-				coverage: f32
-				for y_sample in 0 ..< Y_SAMPLES {
-					start_x := f32(x)     + shape.min.x - 0.5
-					end_x   := f32(x + 1) + shape.min.x - 0.5
-					prev    := start_x
-
-					for (
-					    i[y_sample] < n[y_sample] &&
-					    intersections[y_sample][i[y_sample]] < end_x
-					) {
-						ix := intersections[y_sample][i[y_sample]]
-
-						if i[y_sample] & 1 == 1 {
-							coverage += ix - prev
-						}
-
-						prev         = ix
-						i[y_sample] += 1
-					}
-
-					if i[y_sample] & 1 == 1 {
-						coverage += end_x - prev
-					}
-				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
-			}
-		}
-	}
-
-	fmt.println("fast: ", time.since(start_fast))
-
-	stbi.write_png("fast.png", i32(w), i32(h), 1, raw_data(pixels), 0)
-
-	slice.zero(pixels)
-
-	start_simd := time.now()
-
-	render_shape := get_render_shape(shape)
-
-	{
-		start_linear, end_linear: [Y_SAMPLES]int
-		start_bezier, end_bezier: [Y_SAMPLES]int
-
-		for y in 0 ..< h {
-			n: [Y_SAMPLES]int
-			for y_sample in 0 ..< Y_SAMPLES {
-				render_y   := f32(y) + f32(y_sample) / Y_SAMPLES + shape.min.y - 0.5
-				n[y_sample] = get_intersections_simd(
-					render_shape,
-					render_y,
-					intersections[y_sample],
-					&start_linear[y_sample],
-					&end_linear[y_sample],
-					&start_bezier[y_sample],
-					&end_bezier[y_sample],
-				)
-				slice.sort(intersections[y_sample][:n[y_sample]])
-			}
-
-			i: [Y_SAMPLES]int
-			for x in 0 ..< w {
-				coverage: f32
-				for y_sample in 0 ..< Y_SAMPLES {
-					start_x := f32(x)     + shape.min.x - 0.5
-					end_x   := f32(x + 1) + shape.min.x - 0.5
-					prev    := start_x
-
-					for (
-					    i[y_sample] < n[y_sample] &&
-					    intersections[y_sample][i[y_sample]] < end_x
-					) {
-						ix := intersections[y_sample][i[y_sample]]
-
-						if i[y_sample] & 1 == 1 {
-							coverage += ix - prev
-						}
-
-						prev         = ix
-						i[y_sample] += 1
-					}
-
-					if i[y_sample] & 1 == 1 {
-						coverage += end_x - prev
-					}
-				}
-				pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(coverage / Y_SAMPLES, 1 / 2.2))
-			}
-		}
-	}
-
-	fmt.println("simd: ", time.since(start_simd))
-
-	stbi.write_png("simd.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+	fmt.println("time:", time.since(start_fast))
+	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
 }
