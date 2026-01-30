@@ -1,16 +1,24 @@
 package ttf_odin
 
 import "base:intrinsics"
+import "base:runtime"
 
 import "core:fmt"
 import "core:mem"
 import "core:slice"
-import "core:simd"
+import "core:slice/heap"
 import "core:strings"
 import "core:time"
 import "core:math"
+import "core:prof/spall"
+import os "core:os/os2"
 
-import stbi "vendor:stb/image"
+import stbi  "vendor:stb/image"
+import stbtt "vendor:stb/truetype"
+
+spall_ctx: spall.Context
+@(thread_local)
+spall_buffer: spall.Buffer
 
 File_Header :: struct {
 	sfntVesion:    u32be,
@@ -26,9 +34,12 @@ Font :: struct {
 	units_per_em: int,
 	loca_offset:  int,
 	glyf_offset:  int,
-	loca_32_bit:  bool,
 	cmap_offset:  int,
 	cmap_record:  ^Cmap_Encoding_Record,
+	loca_32_bit:  bool,
+	ascender:     int,
+	descender:    int,
+	cap_height:   int,
 }
 
 Cmap_Platform_Id :: enum u16be {
@@ -78,32 +89,6 @@ Table_Record :: struct {
 	length:   u32be `fmt:"#08x"`,
 }
 
-Maxp_Table :: struct {
-	version:   [2]u16be,
-	numGlyphs: u16be,
-}
-
-Font_Header_Table :: struct #packed {
-	majorVersion:       u16be,
-	minorVersion:       u16be,
-	fontRevision:       u32be,
-	checksumAdjustment: u32be,
-	magicNumber:        u32be,
-	flags:              u16be,
-	unitsPerEm:         u16be,
-	created:            i64be,
-	modified:           i64be,
-	xMin:               i16be,
-	yMin:               i16be,
-	xMax:               i16be,
-	yMax:               i16be,
-	macStyle:           u16be,
-	lowestRecPPEM:      u16be,
-	fontDirectionHint:  i16be,
-	indexToLocFormat:   i16be,
-	glyphDataFormat:    i16be,
-}
-
 @(require_results)
 read_typed :: proc(bytes: []byte, $T: typeid, offset: int) -> (ret: T, ok: bool) {
 	if len(bytes) < size_of(T) + offset {
@@ -116,6 +101,8 @@ read_typed :: proc(bytes: []byte, $T: typeid, offset: int) -> (ret: T, ok: bool)
 
 @(require_results)
 load :: proc(data: []byte) -> (font: Font, ok: bool) {
+	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
 	font.data = data
 
 	header := read_typed(data, File_Header, 0) or_return
@@ -125,13 +112,108 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 		name := strings.truncate_to_byte(string(table.tableTag[:]), 0)
 		switch name {
 		case "maxp":
+			Maxp_Table :: struct {
+				version:   [2]u16be,
+				numGlyphs: u16be,
+			}
+
 			maxp_table      := (^Maxp_Table)(&data[table.offset])
 			font.glyph_count = int(maxp_table.numGlyphs)
 		case "head":
+			Font_Header_Table :: struct #packed {
+				majorVersion:       u16be,
+				minorVersion:       u16be,
+				fontRevision:       u32be,
+				checksumAdjustment: u32be,
+				magicNumber:        u32be,
+				flags:              u16be,
+				unitsPerEm:         u16be,
+				created:            i64be,
+				modified:           i64be,
+				xMin:               i16be,
+				yMin:               i16be,
+				xMax:               i16be,
+				yMax:               i16be,
+				macStyle:           u16be,
+				lowestRecPPEM:      u16be,
+				fontDirectionHint:  i16be,
+				indexToLocFormat:   i16be,
+				glyphDataFormat:    i16be,
+			}
+
 			font_header_table := (^Font_Header_Table)(&data[table.offset])
 			font.units_per_em  = int(font_header_table.unitsPerEm)
 			font.loca_32_bit   = font_header_table.indexToLocFormat == 1
 		case "hhea":
+			Hhea_Table :: struct {
+				majorVersion:        u16,
+				minorVersion:        u16,
+				ascender:            i16,
+				descender:           i16,
+				lineGap:             i16,
+				advanceWidthMax:     u16,
+				minLeftSideBearing:  i16,
+				minRightSideBearing: i16,
+				xMaxExtent:          i16,
+				caretSlopeRise:      i16,
+				caretSlopeRun:       i16,
+				caretOffset:         i16,
+				_reserved:           [4]i16,
+				metricDataFormat:    i16,
+				numberOfHMetrics:    u16,
+			}
+
+			hhea_table := (^Hhea_Table)(&data[table.offset])
+			if font.ascender  == 0 do font.ascender  = int(hhea_table.ascender)
+			if font.descender == 0 do font.descender = int(hhea_table.descender)
+		case "OS/2":
+			OS2_Table :: struct #packed {
+				version:                 u16be,
+				xAvgCharWidth:           i16be,
+				usWeightClass:           u16be,
+				usWidthClass:            u16be,
+				fsType:                  u16be,
+				ySubscriptXSize:         i16be,
+				ySubscriptYSize:         i16be,
+				ySubscriptXOffset:       i16be,
+				ySubscriptYOffset:       i16be,
+				ySuperscriptXSize:       i16be,
+				ySuperscriptYSize:       i16be,
+				ySuperscriptXOffset:     i16be,
+				ySuperscriptYOffset:     i16be,
+				yStrikeoutSize:          i16be,
+				yStrikeoutPosition:      i16be,
+				sFamilyClass:            i16be,
+				panose:                  [10]u8,
+				ulUnicodeRange1:         u32be,
+				ulUnicodeRange2:         u32be,
+				ulUnicodeRange3:         u32be,
+				ulUnicodeRange4:         u32be,
+				achVendID:               [4]u8,
+				fsSelection:             u16be,
+				usFirstCharIndex:        u16be,
+				usLastCharIndex:         u16be,
+				sTypoAscender:           i16be,
+				sTypoDescender:          i16be,
+				sTypoLineGap:            i16be,
+				usWinAscent:             u16be,
+				usWinDescent:            u16be,
+				ulCodePageRange1:        u32be,
+				ulCodePageRange2:        u32be,
+				sxHeight:                i16be,
+				sCapHeight:              i16be,
+				usDefaultChar:           u16be,
+				usBreakChar:             u16be,
+				usMaxContext:            u16be,
+				usLowerOpticalPointSize: u16be,
+				usUpperOpticalPointSize: u16be,
+			}
+
+			os2_table: OS2_Table
+			mem.copy(&os2_table, &data[table.offset], size_of(os2_table))
+			font.ascender   = int(os2_table.sTypoAscender)
+			font.descender  = int(os2_table.sTypoDescender)
+			font.cap_height = int(os2_table.sCapHeight)
 		case "loca":
 			font.loca_offset = int(table.offset)
 		case "glyf":
@@ -161,10 +243,6 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 
 			assert(record != nil)
 			font.cmap_record = record
-		case "hmtx":
-			{}
-		case "OS/2":
-			{}
 		}
 	}
 	
@@ -172,36 +250,10 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 	return
 }
 
-Points_SOA :: struct {
-	x, y: [^]f32,
-}
-
-Range :: struct {
-	min, max: f32,
-}
-
-Render_Shape :: struct {
-	beziers: struct {
-		y_ranges:   [^]Range,
-		p0, p1, p2: Points_SOA,
-		n_chunks:   int,
-	},
-	linears: struct {
-		y_ranges:  [^]Range,
-		a, b:      Points_SOA,
-		n_chunks:  int,
-	},
-	min, max: [2]f32,
-}
-
 Shape :: struct {
-	linears:         []Segment_Linear,
-	beziers:         []Segment_Bezier,
-	linear_y_ranges: []Range,
-	bezier_y_ranges: []Range,
-	linear_chunks:   int,
-	bezier_chunks:   int,
-	min, max:        [2]f32,
+	linears:  []Segment_Linear,
+	beziers:  []Segment_Bezier,
+	min, max: [2]f32,
 }
 
 Glyph :: distinct int
@@ -235,7 +287,9 @@ Segment_Linear :: struct { a, b:       [2]f32, }
 Segment_Bezier :: struct { p0, p1, p2: [2]f32, }
 
 @(require_results)
-glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator) -> (shape: Shape) {
+get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator) -> (shape: Shape) {
+	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
 	glyph_header := get_glyph_header(font, glyph)
 	if glyph_header == nil {
 		return
@@ -249,12 +303,28 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 	linears := make([dynamic]Segment_Linear, allocator)
 	beziers := make([dynamic]Segment_Bezier, allocator)
 
+	bezier_less :: proc(a, b: Segment_Bezier) -> bool {
+		return a.p0.y < b.p0.y
+	}
+
+	linear_less :: proc(a, b: Segment_Linear) -> bool {
+		return a.a.y < b.a.y
+	}
+
 	if glyph_header.numberOfContours >= 0 {
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::collect_points")
+
 		description        := ([^]byte)(glyph_header)[size_of(glyph_header^):]
 		end_points         := ([^]u16be)(description)[:glyph_header.numberOfContours]
 		instruction_length := ([^]u16be)(description)[glyph_header.numberOfContours]
 		n_points           := int(end_points[glyph_header.numberOfContours - 1] + 1)
 		points             := description[int(glyph_header.numberOfContours) * size_of(u16be) + size_of(u16be) + int(instruction_length):]
+
+		reserve(&linears, n_points)
+		reserve(&beziers, n_points)
+
+		linears.allocator = mem.panic_allocator()
+		beziers.allocator = mem.panic_allocator()
 
 		flags  := make([]Simple_Glyph_Flags, n_points, context.temp_allocator)
 		coords := make([][2]f32,             n_points, context.temp_allocator)
@@ -270,53 +340,64 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 		}
 		Simple_Glyph_Flags :: bit_set[Simple_Glyph_Flag; u8]
 
-		flag: Simple_Glyph_Flags
-		for i := 0; i < n_points; i += 1 {
-			flag   = transmute(Simple_Glyph_Flags)points[0]
-			points = points[1:]
-			if .REPEAT_FLAG in flag {
-				repeat_count := int(points[0])
-				points        = points[1:]
-				for j in 0 ..< repeat_count + 1 {
-					flags[i + j] = flag
+		{
+			spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::flag")
+			flag: Simple_Glyph_Flags
+			for i := 0; i < n_points; i += 1 {
+				flag   = transmute(Simple_Glyph_Flags)points[0]
+				points = points[1:]
+				if .REPEAT_FLAG in flag {
+					repeat_count := int(points[0])
+					points        = points[1:]
+					for j in 0 ..< repeat_count + 1 {
+						flags[i + j] = flag
+					}
+					i += repeat_count
+				} else {
+					flags[i] = flag
 				}
-				i += repeat_count
-			} else {
-				flags[i] = flag
 			}
 		}
 
-		x: int
-		for i in 0 ..< n_points {
-			flag := flags[i]
-			if .X_SHORT_VECTOR in flag {
-				dx    := int(points[0])
-				points = points[1:]
-				x     += (.X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR in flag) ? dx : -dx
-			} else {
-				if .X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR not_in flag {
-					x     += int((^i16be)(points)^)
-					points = points[2:]
+		{
+			spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::x")
+			x: int
+			for i in 0 ..< n_points {
+				flag := flags[i]
+				if .X_SHORT_VECTOR in flag {
+					dx    := int(points[0])
+					points = points[1:]
+					x     += (.X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR in flag) ? dx : -dx
+				} else {
+					if .X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR not_in flag {
+						x     += int((^i16be)(points)^)
+						points = points[2:]
+					}
 				}
+				coords[i].x = f32(x)
 			}
-			coords[i].x = f32(x)
 		}
 
-		y: int
-		for i in 0 ..< n_points {
-			flag := flags[i]
-			if .Y_SHORT_VECTOR in flag {
-				dy    := int(points[0])
-				points = points[1:]
-				y     += (.Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR in flag) ? dy : -dy
-			} else {
-				if .Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR not_in flag {
-					y     += int((^i16be)(points)^)
-					points = points[2:]
+		{
+			spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::y")
+			y: int
+			for i in 0 ..< n_points {
+				flag := flags[i]
+				if .Y_SHORT_VECTOR in flag {
+					dy    := int(points[0])
+					points = points[1:]
+					y     += (.Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR in flag) ? dy : -dy
+				} else {
+					if .Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR not_in flag {
+						y     += int((^i16be)(points)^)
+						points = points[2:]
+					}
 				}
+				coords[i].y = f32(y)
 			}
-			coords[i].y = f32(y)
 		}
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::collect_contours")
 
 		current: int
 		for c in 0 ..< glyph_header.numberOfContours {
@@ -347,14 +428,22 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 					}
 					prev = coords[current]
 				} else {
-					defer {
-						bezier := pop(&beziers)
+					insert_bezier :: proc(beziers: ^[dynamic]Segment_Bezier, bezier: Segment_Bezier) {
+						push :: proc(beziers: ^[dynamic]Segment_Bezier, bezier: Segment_Bezier) {
+							// assert(bezier.p0.y <= bezier.p1.y)
+							// assert(bezier.p1.y <= bezier.p2.y)
+							append(beziers, bezier)
+						}
+
+						bezier := bezier
+
 						if bezier.p0.y > bezier.p2.y {
 							bezier.p0, bezier.p2 = bezier.p2, bezier.p0
 						}
 						denom := bezier.p0.y - 2 * bezier.p1.y + bezier.p2.y
 						if abs(denom) < 0.0001 {
-							append(&beziers, bezier)
+							bezier.p1.y = clamp(bezier.p1.y, bezier.p0.y, bezier.p2.y)
+							push(beziers, bezier)
 						} else {
 							t_split := (bezier.p0.y - bezier.p1.y) / denom
 							if 0 < t_split && t_split < 1 {
@@ -365,35 +454,30 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 								s  := math.lerp(q0,        q1,        t_split)
 
 								if bezier.p1.y > bezier.p2.y {
-									append(&beziers, Segment_Bezier { bezier.p0, q0, s, })
-									append(&beziers, Segment_Bezier { bezier.p2, q1, s, })
+									push(beziers, Segment_Bezier { bezier.p0, q0, s, })
+									push(beziers, Segment_Bezier { bezier.p2, q1, s, })
 								} else {
-									append(&beziers, Segment_Bezier { s, q0, bezier.p0, })
-									append(&beziers, Segment_Bezier { s, q1, bezier.p2, })
+									push(beziers, Segment_Bezier { s, q0, bezier.p0, })
+									push(beziers, Segment_Bezier { s, q1, bezier.p2, })
 								}
 							} else {
-								append(&beziers, bezier)
+								push(beziers, bezier)
 							}
 						}
 					}
 
-					if current + 1 > end {
-						if .ON_CURVE_POINT in flags[start] {
-							append(&beziers, Segment_Bezier { p0 = prev, p1 = coords[current], p2 = coords[start], })
-						} else {
-							mid := (coords[current] + coords[start]) / 2
-							append(&beziers, Segment_Bezier { p0 = prev, p1 = coords[current], p2 = mid, })
-						}
-						break
+					next := current + 1
+					if next > end {
+						next = start
 					}
 
-					if .ON_CURVE_POINT in flags[current + 1] {
-						append(&beziers, Segment_Bezier { p0 = prev, p1 = coords[current], p2 = coords[current + 1], })
-						prev     = coords[current + 1]
+					if .ON_CURVE_POINT in flags[next] {
+						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = coords[next], })
+						prev     = coords[next]
 						current += 1
 					} else {
-						mid := (coords[current] + coords[current + 1]) / 2
-						append(&beziers, Segment_Bezier { p0 = prev, p1 = coords[current], p2 = mid, })
+						mid := (coords[current] + coords[next]) / 2
+						insert_bezier(&beziers, { p0 = prev, p1 = coords[current], p2 = mid, })
 						prev = mid
 					}
 				}
@@ -406,57 +490,76 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 		unimplemented()
 	}
 
-	when ODIN_DEBUG do for bezier in beziers {
-		assert(bezier.p0.y <= bezier.p1.y)
-		assert(bezier.p1.y <= bezier.p2.y)
-	}
+	{
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "get_glyph_shape::sort_curves")
 
-	// Build acceleration structure
+		radix_sort_by :: proc(data: $S/[]$E, f: proc(e: E) -> $T) where intrinsics.type_is_integer(T) {
+			Bucket :: [dynamic]E
 
-	slice.sort_by(linears[:], proc(a, b: Segment_Linear) -> bool {
-		return a.a.y < b.a.y
-	})
-	slice.sort_by(beziers[:], proc(a, b: Segment_Bezier) -> bool {
-		return a.p0.y < b.p0.y
-	})
+			BUCKETS_LOG2 :: 8
+			BUCKETS      :: 1 << BUCKETS_LOG2
+			RADIX_MASK   :: BUCKETS - 1
 
-	#assert((RENDER_CHUNK_SIZE - 1) & RENDER_CHUNK_SIZE == 0)
-	shape.bezier_chunks = (len(beziers) + RENDER_CHUNK_SIZE - 1) / RENDER_CHUNK_SIZE
-	shape.linear_chunks = (len(linears) + RENDER_CHUNK_SIZE - 1) / RENDER_CHUNK_SIZE
-
-	shape.bezier_y_ranges = make([]Range, shape.bezier_chunks, allocator)
-	shape.linear_y_ranges = make([]Range, shape.linear_chunks, allocator)
-
-	max_y := min(f32)
-	for chunk in 0 ..< shape.linear_chunks {
-		i     := chunk * RENDER_CHUNK_SIZE
-		min_y := max(f32)
-		for j in 0 ..< RENDER_CHUNK_SIZE {
-			if i + j >= len(linears) {
-				break
+			when !intrinsics.type_is_unsigned(T) {
+				_sign_bit_mask := u128(1 << (size_of(T) * 8 - 1))
+				sign_bit_mask  := T(_sign_bit_mask)
 			}
 
-			linear := linears[i + j]
-			min_y   = min(min_y, linear.a.y, linear.b.y)
-			max_y   = max(max_y, linear.a.y, linear.b.y)
-		}
-		shape.linear_y_ranges[chunk] = { min = min_y, max = max_y, }
-	}
-
-	max_y = min(f32)
-	for chunk in 0 ..< shape.bezier_chunks {
-		i     := chunk * RENDER_CHUNK_SIZE
-		min_y := max(f32)
-		for j in 0 ..< RENDER_CHUNK_SIZE {
-			if i + j >= len(beziers) {
-				break
+			buckets: [BUCKETS]Bucket
+			defer for b in buckets {
+				delete(b)
 			}
 
-			bezier := beziers[i + j]
-			min_y   = min(min_y, bezier.p0.y, bezier.p1.y, bezier.p2.y)
-			max_y   = max(max_y, bezier.p0.y, bezier.p1.y, bezier.p2.y)
+			shift: uint
+			for shift < size_of(T) * 8 {
+				for elem in data {
+					key := f(elem)
+					when intrinsics.type_is_unsigned(T) {
+						append(&buckets[int(key >> shift) & RADIX_MASK], elem)
+					} else {
+						append(&buckets[int((key ~ sign_bit_mask) >> shift) & RADIX_MASK], elem)
+					}
+				}
+
+				i := 0
+				for &bucket in buckets {
+					for e in bucket {
+						data[i] = e
+						i      += 1
+					}
+					clear(&bucket)
+				}
+
+				shift += BUCKETS_LOG2
+			}
 		}
-		shape.bezier_y_ranges[chunk] = { min = min_y, max = max_y, }
+
+		// radix_sort_by(beziers[:], proc(bezier: Segment_Bezier) -> u32 {
+		// 	f := bezier.p0.y
+		// 	if f < 0 {
+		// 		return 0x7FFF_FFFF - transmute(u32)f & 0x7FFF_FFFF
+		// 	} else {
+		// 		return transmute(u32)f + 0x7FFF_FFFF
+		// 	}
+		// })
+
+		// radix_sort_by(linears[:], proc(linear: Segment_Linear) -> u32 {
+		// 	f := linear.a.y
+		// 	if f < 0 {
+		// 		return 0x7FFF_FFFF - transmute(u32)f & 0x7FFF_FFFF
+		// 	} else {
+		// 		return transmute(u32)f + 0x7FFF_FFFF
+		// 	}
+		// })
+
+		heap.make(linears[:], linear_less)
+		heap.sort(linears[:], linear_less)
+
+		heap.make(beziers[:], bezier_less)
+		heap.sort(beziers[:], bezier_less)
+
+		// slice.sort_by(linears[:], linear_less)
+		// slice.sort_by(beziers[:], bezier_less)
 	}
 
 	shape.beziers = beziers[:]
@@ -465,30 +568,28 @@ glyph_get_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 }
 
 get_intersections :: proc(
-	shape:         Shape,
+	beziers:       []Segment_Bezier,
+	linears:       []Segment_Linear,
 	y:             f32,
 	intersections: []f32,
-	min_linear :=  0,
-	max_linear := -1,
-	min_bezier :=  0,
-	max_bezier := -1,
 ) -> (n_intersections: int) {
-	max_linear := max_linear >= 0 ? max_linear : len(shape.linears)
-	max_bezier := max_bezier >= 0 ? max_bezier : len(shape.beziers)
-
-	for linear in shape.linears[min_linear:max_linear] {
+	for linear in linears {
 		if !(linear.a.y <= y && y < linear.b.y) {
 			continue
-	    }
+		}
 
 		t  := (y - linear.a.y) / (linear.b.y - linear.a.y)
 		vx := (1 - t) * linear.a.x + t * linear.b.x
 
 		intersections[n_intersections] = vx
 		n_intersections               += 1
+
+		heap.push(intersections[:n_intersections], proc(a, b: f32) -> bool {
+			return a < b
+		})
 	}
 
-	for bezier in shape.beziers[min_bezier:max_bezier] {
+	for bezier in beziers {
 		if !(bezier.p0.y <= y && y < bezier.p2.y) {
 			continue
 		}
@@ -507,213 +608,22 @@ get_intersections :: proc(
 		vx                            := math.lerp(math.lerp(bezier.p0.x, bezier.p1.x, t), math.lerp(bezier.p1.x, bezier.p2.x, t), t)
 		intersections[n_intersections] = vx
 		n_intersections               += 1
+
+		heap.push(intersections[:n_intersections], proc(a, b: f32) -> bool {
+			return a < b
+		})
 	}
+
+	heap.sort(intersections[:n_intersections], proc(a, b: f32) -> bool {
+		return a < b
+	})
 
 	return
-}
-
-RENDER_CHUNK_SIZE :: 8
-
-@(require_results)
-get_render_shape :: proc(shape: Shape, allocator := context.allocator) -> (render_shape: Render_Shape) {
-	round_up :: proc(x, y: int) -> int {
-		mask := y - 1
-		return (x + mask) &~ mask
-	}
-
-	linears_len                  := round_up(len(shape.linears), RENDER_CHUNK_SIZE)
-	beziers_len                  := round_up(len(shape.beziers), RENDER_CHUNK_SIZE)
-	allocation_len               := 4 * linears_len + 6 * beziers_len + 2 * linears_len / RENDER_CHUNK_SIZE + 2 * beziers_len / RENDER_CHUNK_SIZE
-	allocation                   := ([^]f32)(mem.alloc(allocation_len * size_of(f32), RENDER_CHUNK_SIZE * size_of(f32), allocator) or_else panic("Failed to allocate memory"))[:allocation_len]
-
-	render_shape.beziers.p0.x     = raw_data(allocation);           allocation = allocation[beziers_len:]
-	render_shape.beziers.p0.y     = raw_data(allocation);           allocation = allocation[beziers_len:]
-	render_shape.beziers.p1.x     = raw_data(allocation);           allocation = allocation[beziers_len:]
-	render_shape.beziers.p1.y     = raw_data(allocation);           allocation = allocation[beziers_len:]
-	render_shape.beziers.p2.x     = raw_data(allocation);           allocation = allocation[beziers_len:]
-	render_shape.beziers.p2.y     = raw_data(allocation);           allocation = allocation[beziers_len:]
-
-	render_shape.linears.a.x      = raw_data(allocation);           allocation = allocation[linears_len:]
-	render_shape.linears.a.y      = raw_data(allocation);           allocation = allocation[linears_len:]
-	render_shape.linears.b.x      = raw_data(allocation);           allocation = allocation[linears_len:]
-	render_shape.linears.b.y      = raw_data(allocation);           allocation = allocation[linears_len:]
-
-	render_shape.beziers.y_ranges = auto_cast raw_data(allocation); allocation = allocation[2 * beziers_len / RENDER_CHUNK_SIZE:]
-	render_shape.linears.y_ranges = auto_cast raw_data(allocation); allocation = allocation[2 * linears_len / RENDER_CHUNK_SIZE:]
-
-	assert(len(allocation) == 0)
-
-	render_shape.beziers.n_chunks = beziers_len / RENDER_CHUNK_SIZE
-	max_y := min(f32)
-	for chunk in 0 ..< render_shape.beziers.n_chunks {
-		i     := chunk * RENDER_CHUNK_SIZE
-		min_y := max(f32)
-		for j in 0 ..< RENDER_CHUNK_SIZE {
-			if i + j >= len(shape.beziers) {
-				break
-			}
-
-			bezier := shape.beziers[i + j]
-
-			render_shape.beziers.p0.x[i + j] = bezier.p0.x
-			render_shape.beziers.p0.y[i + j] = bezier.p0.y
-			render_shape.beziers.p1.x[i + j] = bezier.p1.x
-			render_shape.beziers.p1.y[i + j] = bezier.p1.y
-			render_shape.beziers.p2.x[i + j] = bezier.p2.x
-			render_shape.beziers.p2.y[i + j] = bezier.p2.y
-
-			min_y = min(min_y, bezier.p0.y, bezier.p1.y, bezier.p2.y)
-			max_y = max(max_y, bezier.p0.y, bezier.p1.y, bezier.p2.y)
-		}
-		render_shape.beziers.y_ranges[chunk] = { min = min_y, max = max_y, }
-	}
-
-	render_shape.linears.n_chunks = linears_len / RENDER_CHUNK_SIZE
-	max_y = min(f32)
-	for chunk in 0 ..< render_shape.linears.n_chunks {
-		i     := chunk * RENDER_CHUNK_SIZE
-		min_y := max(f32)
-		for j in 0 ..< RENDER_CHUNK_SIZE {
-			if i + j >= len(shape.linears) {
-				break
-			}
-
-			linear := shape.linears[i + j]
-
-			render_shape.linears.a.x[i + j] = linear.a.x
-			render_shape.linears.a.y[i + j] = linear.a.y
-			render_shape.linears.b.x[i + j] = linear.b.x
-			render_shape.linears.b.y[i + j] = linear.b.y
-
-			min_y = min(min_y, linear.a.y, linear.b.y)
-			max_y = max(max_y, linear.a.y, linear.b.y)
-		}
-		render_shape.linears.y_ranges[chunk] = { min = min_y, max = max_y, }
-	}
-
-	render_shape.min = shape.min
-	render_shape.max = shape.max
-
-	return
-}
-
-get_intersections_simd :: proc(
-	shape:                    Render_Shape,
-	y:                        f32,
-	intersections:            []f32,
-	start_linear, end_linear: ^int,
-	start_bezier, end_bezier: ^int,
-) -> (n_intersections: int) {
-	for start_linear^ < shape.linears.n_chunks && y > shape.linears.y_ranges[start_linear^].max {
-		start_linear^ += 1
-	}
-	for end_linear^ < shape.linears.n_chunks && y >= shape.linears.y_ranges[end_linear^].min {
-		end_linear^ += 1
-	}
-
-	for start_bezier^ < shape.beziers.n_chunks && y > shape.beziers.y_ranges[start_bezier^].max {
-		start_bezier^ += 1
-	}
-	for end_bezier^ < shape.beziers.n_chunks && y >= shape.beziers.y_ranges[end_bezier^].min {
-		end_bezier^ += 1
-	}
-
-	for chunk in start_linear^ ..< end_linear^ {
-		offset   := chunk * RENDER_CHUNK_SIZE
-		ax       := (^#simd[RENDER_CHUNK_SIZE]f32)(&shape.linears.a.x[offset])^
-		ay       := (^#simd[RENDER_CHUNK_SIZE]f32)(&shape.linears.a.y[offset])^
-		bx       := (^#simd[RENDER_CHUNK_SIZE]f32)(&shape.linears.b.x[offset])^
-		by       := (^#simd[RENDER_CHUNK_SIZE]f32)(&shape.linears.b.y[offset])^
-		y        := ( #simd[RENDER_CHUNK_SIZE]f32)(y)
-		hit_mask := simd.lanes_gt(by, y) & simd.lanes_le(ay, y)
-		t        := (y - ay) / (by - ay)
-		vx       := (1 - t) * ax + t * bx
-
-		hits   := simd.to_array(hit_mask)
-		values := simd.to_array(vx)
-		for i in 0 ..< RENDER_CHUNK_SIZE {
-			if hits[i] == 0 {
-				continue
-			}
-
-			intersections[n_intersections] = values[i]
-			n_intersections               += 1
-		}
-	}
-
-	for chunk in start_bezier^ ..< end_bezier^ {
-		N           :: RENDER_CHUNK_SIZE
-
-		offset      := chunk * RENDER_CHUNK_SIZE
-
-		p0x         := (^#simd[N]f32)(&shape.beziers.p0.x[offset])^
-		p0y         := (^#simd[N]f32)(&shape.beziers.p0.y[offset])^
-		p1x         := (^#simd[N]f32)(&shape.beziers.p1.x[offset])^
-		p1y         := (^#simd[N]f32)(&shape.beziers.p1.y[offset])^
-		p2x         := (^#simd[N]f32)(&shape.beziers.p2.x[offset])^
-		p2y         := (^#simd[N]f32)(&shape.beziers.p2.y[offset])^
-		y           := ( #simd[N]f32)(y)
-
-		a           := p0y - 2 * p1y + p2y
-		b           := -2 * p0y + 2 * p1y
-		c           := p0y - y
-
-		linear_mask := simd.lanes_lt(simd.abs(a), 0.0001)
-		hit_mask    := simd.lanes_gt(p2y, y) & simd.lanes_le(p0y, y)
-
-		t_linear    := (y - p0y) / (p2y - p0y)
-		t_bezier    := (-b + simd.sqrt(b * b - 4 * a * c)) / (2 * a)
-
-		t           := simd.select(linear_mask, t_linear, t_bezier)
-		vx          := math.lerp(math.lerp(p0x, p1x, t), math.lerp(p1x, p2x, t), t)
-		values      := simd.to_array(vx)
-		hits        := simd.to_array(hit_mask)
-
-		for i in 0 ..< N {
-			if hits[i] == 0 {
-				continue
-			}
-
-			intersections[n_intersections] = values[i]
-			n_intersections               += 1
-		}
-	}
-	return
-}
-
-get_intersections_fast :: proc(
-	shape:                    Shape,
-	y:                        f32,
-	intersections:            []f32,
-	start_linear, end_linear: ^int,
-	start_bezier, end_bezier: ^int,
-) -> (n_intersections: int) {
-	for start_linear^ < shape.linear_chunks && y > shape.linear_y_ranges[start_linear^].max {
-		start_linear^ += 1
-	}
-	for end_linear^ < shape.linear_chunks && y >= shape.linear_y_ranges[end_linear^].min {
-		end_linear^ += 1
-	}
-
-	for start_bezier^ < shape.bezier_chunks && y > shape.bezier_y_ranges[start_bezier^].max {
-		start_bezier^ += 1
-	}
-	for end_bezier^ < shape.bezier_chunks && y >= shape.bezier_y_ranges[end_bezier^].min {
-		end_bezier^ += 1
-	}
-
-	return get_intersections(
-		shape,
-		y,
-		intersections,
-		min(start_linear^ * RENDER_CHUNK_SIZE, len(shape.linears)),
-		min(end_linear^   * RENDER_CHUNK_SIZE, len(shape.linears)),
-		min(start_bezier^ * RENDER_CHUNK_SIZE, len(shape.beziers)),
-		min(end_bezier^   * RENDER_CHUNK_SIZE, len(shape.beziers)),
-	)
 }
 
 get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
+	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
 	codepoint := u32(codepoint)
 
 	if font.cmap_record.platformId != .Unicode {
@@ -784,103 +694,267 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	return 0
 }
 
-Y_SAMPLES :: 4
-
-get_bitmap_size :: proc(font: Font, shape: Shape, font_size: f32) -> (w: int, h: int) {
-	scale := font_size / f32(font.units_per_em)
-	w      = int((shape.max.x - shape.min.x) * scale) + 2
-	h      = int((shape.max.y - shape.min.y) * scale) + 2
+get_bitmap_size :: proc(font: Font, shape: Shape, font_height: f32) -> (w: int, h: int) {
+	scale := font_height / f32(font.cap_height)
+	min   := shape.min * scale
+	max   := shape.max * scale
+	w      = int(math.ceil(max.x) - math.floor(min.x))
+	h      = int(math.ceil(max.y) - math.floor(min.y))
 	return
 }
 
 render_shape_bitmap :: proc(
-	font:      Font,
-	shape:     Shape,
-	font_size: f32,
-	pixels:    []u8,
-	stride:    int = -1,
+	font:        Font,
+	shape:       Shape,
+	font_height: f32,
+	pixels:      []u8,
+	stride:      int = -1,
 ) {
+	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
+	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
+
+	scale := font_height / f32(font.cap_height)
+	w, h  := get_bitmap_size(font, shape, font_height)
+
 	stride := stride
-
-	intersections: [Y_SAMPLES][]f32
-	for &i in intersections {
-		i = make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
-	}
-
-	scale := font_size / f32(font.units_per_em)
-	w, h  := get_bitmap_size(font, shape, font_size)
-
 	if stride <= 0 {
 		stride = w
 	}
 
 	assert(len(pixels) >= stride * h)
 
-	start_linear, end_linear: [Y_SAMPLES]int
-	start_bezier, end_bezier: [Y_SAMPLES]int
+	y_samples    := h < 10 ? 15 : 5
+	max_coverage := f32(255 / y_samples)
+	assert(255 % y_samples == 0)
 
+	RANGE :: true
+
+	when RANGE {
+		beziers_start, beziers_end: int
+		linears_start, linears_end: int
+	} else {
+		active_beziers := make([dynamic]Segment_Bezier, 0, len(shape.beziers), context.temp_allocator)
+		active_linears := make([dynamic]Segment_Linear, 0, len(shape.linears), context.temp_allocator)
+		beziers        := shape.beziers
+		linears        := shape.linears
+	}
+
+	scanline := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
-		n: [Y_SAMPLES]int
-		for y_sample in 0 ..< Y_SAMPLES {
-			render_y   := (f32(y) + f32(y_sample) / Y_SAMPLES - 0.5) / scale + shape.min.y
-			n[y_sample] = get_intersections_fast(
-				shape,
-				render_y,
-				intersections[y_sample],
-				&start_linear[y_sample],
-				&end_linear[y_sample],
-				&start_bezier[y_sample],
-				&end_bezier[y_sample],
-			)
-			slice.sort(intersections[y_sample][:n[y_sample]])
-		}
+		for y_sample in 0 ..< y_samples {
+			render_y := (f32(y) + f32(y_sample) / f32(y_samples)) / scale + shape.min.y
 
-		i: [Y_SAMPLES]int
-		for x in 0 ..< w {
-			coverage: f32
-			for y_sample in 0 ..< Y_SAMPLES {
-				start_x := (f32(x)     - 0.5) / scale + shape.min.x
-				end_x   := (f32(x + 1) - 0.5) / scale + shape.min.x
-				prev    := start_x
-
-				for (
-				    i[y_sample] < n[y_sample] &&
-				    intersections[y_sample][i[y_sample]] < end_x
-				) {
-					ix := intersections[y_sample][i[y_sample]]
-
-					if i[y_sample] & 1 == 1 {
-						coverage += ix - prev
-					}
-
-					prev         = ix
-					i[y_sample] += 1
+			when RANGE {
+				for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
+					beziers_start += 1
+				}
+				for beziers_end < len(shape.beziers) && shape.beziers[beziers_end].p0.y <= render_y {
+					beziers_end += 1
 				}
 
-				if i[y_sample] & 1 == 1 {
-					coverage += end_x - prev
+				for linears_start < len(shape.linears) && shape.linears[linears_start].b.y <= render_y {
+					linears_start += 1
+				}
+				for linears_end < len(shape.linears) && shape.linears[linears_end].a.y <= render_y {
+					linears_end += 1
+				}
+			} else {
+				for i := 0; i < len(active_beziers); {
+					bezier := active_beziers[i]
+					if bezier.p2.y <= render_y {
+						unordered_remove(&active_beziers, i)
+					} else {
+						assert(bezier.p0.y <= render_y && render_y < bezier.p2.y)
+						i += 1
+					}
+				}
+
+				for len(beziers) != 0 && beziers[0].p0.y <= render_y {
+					if render_y < beziers[0].p2.y {
+						assert(beziers[0].p0.y <= render_y && render_y < beziers[0].p2.y)
+						append(&active_beziers, beziers[0])
+					}
+					beziers = beziers[1:]
+				}
+
+				for i := 0; i < len(active_linears); {
+					linear := active_linears[i]
+					if linear.b.y <= render_y {
+						unordered_remove(&active_linears, i)
+					} else {
+						assert(linear.a.y <= render_y && render_y < linear.b.y)
+						i += 1
+					}
+				}
+
+				for len(linears) != 0 && linears[0].a.y <= render_y {
+					if render_y < linears[0].b.y {
+						assert(linears[0].a.y <= render_y && render_y < linears[0].b.y)
+						append(&active_linears, linears[0])
+					}
+					linears = linears[1:]
 				}
 			}
-			pixels[x + (h - y - 1) * w] = u8(255.999 * math.pow(scale * coverage / Y_SAMPLES, 1 / 2.2))
+
+			when RANGE {
+				n := get_intersections(
+					shape.beziers[beziers_start:beziers_end],
+					shape.linears[linears_start:linears_end],
+					render_y,
+					intersections,
+				)
+			} else {
+				n := get_intersections(active_beziers[:], active_linears[:], render_y, intersections)
+			}
+
+			current_intersection: int
+			for current_intersection < n - 1 {
+				start := (intersections[current_intersection + 0] - shape.min.x) * scale
+				end   := (intersections[current_intersection + 1] - shape.min.x) * scale
+
+				if int(start) == int(end) {
+					scanline[int(start)] += u8((end - start) * max_coverage)
+				} else {
+					scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
+					for x in int(start) + 1 ..< int(end) {
+						scanline[x] += 255 / u8(y_samples)
+					}
+					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+				}
+
+				current_intersection += 2
+			}
 		}
+
+		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w)
+		mem.zero(raw_data(scanline), w)
+	}
+}
+
+render_shape_coverage_mask :: proc(
+	font:      Font,
+	shape:     Shape,
+	font_size: f32,
+	pixels:    []u16,
+	stride:    int = -1,
+) {
+	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
+	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
+
+	scale := font_size / f32(font.units_per_em)
+	w, h  := get_bitmap_size(font, shape, font_size)
+
+	stride := stride
+	if stride <= 0 {
+		stride = w
+	}
+
+	assert(len(pixels) >= stride * h)
+
+	beziers_start, beziers_end: int
+	linears_start, linears_end: int
+
+	for y in 0 ..< h {
+		for y_sample in 0 ..< 4 {
+			render_y := (f32(y) + f32(y_sample) / 4) / scale + shape.min.y
+
+			for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
+				beziers_start += 1
+			}
+			for beziers_end < len(shape.beziers) && shape.beziers[beziers_end].p0.y <= render_y {
+				beziers_end += 1
+			}
+
+			for linears_start < len(shape.linears) && shape.linears[linears_start].b.y <= render_y {
+				linears_start += 1
+			}
+			for linears_end < len(shape.linears) && shape.linears[linears_end].a.y <= render_y {
+				linears_end += 1
+			}
+
+			n := get_intersections(
+				shape.beziers[beziers_start:beziers_end],
+				shape.linears[linears_start:linears_end],
+				render_y,
+				intersections,
+			)
+
+			current_intersection: int
+			for current_intersection < n - 1 {
+				start := (intersections[current_intersection + 0] - shape.min.x) * scale + 0.5
+				end   := (intersections[current_intersection + 1] - shape.min.x) * scale - 0.5
+
+				// if int(start) == int(end) {
+				// 	scanline[int(start)] += u8((end - start) * max_coverage)
+				// } else {
+				// 	scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
+				// 	for x in int(start) + 1 ..< int(end) {
+				// 		scanline[x] += 255 / u8(y_samples)
+				// 	}
+				// 	scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+				// }
+
+				current_intersection += 2
+			}
+		}
+
+		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w)
+		mem.zero(raw_data(scanline), w)
 	}
 }
 
 main :: proc() {
-	FONT_SIZE :: 18
+	spall_ctx = spall.context_create("trace_test.spall")
+	defer spall.context_destroy(&spall_ctx)
 
-	// font   := load(#load("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf")) or_else panic("Failed to load font")
-	// font   := load(#load("/usr/share/fonts/inter/InterVariable.ttf"              )) or_else panic("Failed to load font")
-	font   := load(#load("/usr/share/fonts/TTF/Inconsolata-Regular.ttf"          )) or_else panic("Failed to load font")
-	glyph  := get_codepoint_glyph(font, '?')
-	shape  := glyph_get_shape(font, glyph)
-	w, h   := get_bitmap_size(font, shape, FONT_SIZE)
-	pixels := make([]u8, w * h)
+	buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+	defer delete(buffer_backing)
 
-	start_fast := time.now()
+	spall_buffer = spall.buffer_create(buffer_backing)
+	defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-	render_shape_bitmap(font, shape, FONT_SIZE, pixels)
+	FONT_SIZE :: 100
+	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
+	// FONT_PATH :: "/usr/share/fonts/inter/InterVariable.ttf"
+	// FONT_PATH :: "/usr/share/fonts/TTF/Inconsolata-Regular.ttf"
+	font_data := os.read_entire_file(FONT_PATH, context.temp_allocator) or_else panic("Failed to read font data")
 
-	fmt.println("time:", time.since(start_fast))
+	// CODEPOINT :: ''
+	// CODEPOINT :: ''
+	CODEPOINT :: 'A'
+
+	font      := load(font_data) or_else panic("Failed to load font")
+
+	start     := time.now()
+
+	glyph     := get_codepoint_glyph(font, CODEPOINT)
+	shape     := get_glyph_shape(font, glyph)
+	w, h      := get_bitmap_size(font, shape, FONT_SIZE)
+	pixels    := make([]u8, w * h)
+
+	N :: 1 << 10
+
+	for _ in 0 ..< N {
+		glyph := get_codepoint_glyph(font, CODEPOINT)
+		shape := get_glyph_shape(font, glyph)
+		render_shape_bitmap(font, shape, FONT_SIZE, pixels)
+	}
+
+	fmt.println("time:", time.since(start) / N)
 	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+
+	{
+		fontinfo: stbtt.fontinfo
+		stbtt.InitFont(&fontinfo, raw_data(font_data), 0)
+
+		start_time := time.now()
+		pixels     := make([^]u8, w * h)
+		for _ in 0 ..< N {
+			stbtt.MakeCodepointBitmap(&fontinfo, pixels, i32(w), i32(h), i32(w), FONT_SIZE / f32(font.cap_height), FONT_SIZE / f32(font.cap_height), CODEPOINT)
+		}
+		fmt.println("stb: ", time.since(start_time) / N)
+		stbi.write_png("stb.png", i32(w), i32(h), 1, pixels, 0)
+	}
 }
