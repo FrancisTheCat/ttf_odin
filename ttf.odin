@@ -110,6 +110,7 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 
 	for &table in tables {
 		name := strings.truncate_to_byte(string(table.tableTag[:]), 0)
+		fmt.println(name)
 		switch name {
 		case "maxp":
 			Maxp_Table :: struct {
@@ -694,8 +695,11 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	return 0
 }
 
-get_bitmap_size :: proc(font: Font, shape: Shape, font_height: f32) -> (w: int, h: int) {
-	scale := font_height / f32(font.cap_height)
+font_height_to_scale :: proc(font: Font, font_height: f32) -> f32 {
+	return font_height / f32(font.cap_height)
+}
+
+get_bitmap_size :: proc(font: Font, shape: Shape, scale: [2]f32) -> (w: int, h: int) {
 	min   := shape.min * scale
 	max   := shape.max * scale
 	w      = int(math.ceil(max.x) - math.floor(min.x))
@@ -704,18 +708,17 @@ get_bitmap_size :: proc(font: Font, shape: Shape, font_height: f32) -> (w: int, 
 }
 
 render_shape_bitmap :: proc(
-	font:        Font,
-	shape:       Shape,
-	font_height: f32,
-	pixels:      []u8,
-	stride:      int = -1,
+	font:   Font,
+	shape:  Shape,
+	scale:  [2]f32,
+	pixels: []u8,
+	stride: int = -1,
 ) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
 	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 
-	scale := font_height / f32(font.cap_height)
-	w, h  := get_bitmap_size(font, shape, font_height)
+	w, h  := get_bitmap_size(font, shape, scale)
 
 	stride := stride
 	if stride <= 0 {
@@ -743,7 +746,7 @@ render_shape_bitmap :: proc(
 	scanline := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< y_samples {
-			render_y := (f32(y) + f32(y_sample) / f32(y_samples)) / scale + shape.min.y
+			render_y := (f32(y) + f32(y_sample) / f32(y_samples)) / scale.y + shape.min.y
 
 			when RANGE {
 				for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
@@ -810,8 +813,8 @@ render_shape_bitmap :: proc(
 
 			current_intersection: int
 			for current_intersection < n - 1 {
-				start := (intersections[current_intersection + 0] - shape.min.x) * scale
-				end   := (intersections[current_intersection + 1] - shape.min.x) * scale
+				start := (intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5
+				end   := (intersections[current_intersection + 1] - shape.min.x) * scale.x + 0.5
 
 				if int(start) == int(end) {
 					scanline[int(start)] += u8((end - start) * max_coverage)
@@ -832,7 +835,7 @@ render_shape_bitmap :: proc(
 	}
 }
 
-render_shape_coverage_mask :: proc(
+render_shape_packed :: proc(
 	font:      Font,
 	shape:     Shape,
 	font_size: f32,
@@ -853,9 +856,14 @@ render_shape_coverage_mask :: proc(
 
 	assert(len(pixels) >= stride * h)
 
+	y_samples    := h < 10 ? 15 : 5
+	max_coverage := f32(255 / y_samples)
+	assert(255 % y_samples == 0)
+
 	beziers_start, beziers_end: int
 	linears_start, linears_end: int
 
+	scanline := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< 4 {
 			render_y := (f32(y) + f32(y_sample) / 4) / scale + shape.min.y
@@ -886,15 +894,15 @@ render_shape_coverage_mask :: proc(
 				start := (intersections[current_intersection + 0] - shape.min.x) * scale + 0.5
 				end   := (intersections[current_intersection + 1] - shape.min.x) * scale - 0.5
 
-				// if int(start) == int(end) {
-				// 	scanline[int(start)] += u8((end - start) * max_coverage)
-				// } else {
-				// 	scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
-				// 	for x in int(start) + 1 ..< int(end) {
-				// 		scanline[x] += 255 / u8(y_samples)
-				// 	}
-				// 	scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
-				// }
+				if int(start) == int(end) {
+					scanline[int(start)] += u8((end - start) * max_coverage)
+				} else {
+					scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
+					for x in int(start) + 1 ..< int(end) {
+						scanline[x] += 255 / u8(y_samples)
+					}
+					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+				}
 
 				current_intersection += 2
 			}
@@ -915,7 +923,7 @@ main :: proc() {
 	spall_buffer = spall.buffer_create(buffer_backing)
 	defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-	FONT_SIZE :: 100
+	FONT_SIZE :: 200
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 	// FONT_PATH :: "/usr/share/fonts/inter/InterVariable.ttf"
 	// FONT_PATH :: "/usr/share/fonts/TTF/Inconsolata-Regular.ttf"
@@ -930,8 +938,12 @@ main :: proc() {
 	start     := time.now()
 
 	glyph     := get_codepoint_glyph(font, CODEPOINT)
+	scale     := font_height_to_scale(font, FONT_SIZE) * [2]f32{ 3, 1, }
 	shape     := get_glyph_shape(font, glyph)
-	w, h      := get_bitmap_size(font, shape, FONT_SIZE)
+	w, h      := get_bitmap_size(font, shape, scale)
+	for w % 3 != 0 {
+		w += 1
+	}
 	pixels    := make([]u8, w * h)
 
 	N :: 1 << 10
@@ -939,20 +951,32 @@ main :: proc() {
 	for _ in 0 ..< N {
 		glyph := get_codepoint_glyph(font, CODEPOINT)
 		shape := get_glyph_shape(font, glyph)
-		render_shape_bitmap(font, shape, FONT_SIZE, pixels)
+		render_shape_bitmap(font, shape, scale, pixels, w)
+	}
+
+	for y in 0 ..< h {
+		for x in 0 ..< w / 3 {
+			x := x * 3
+			// pixels[y * w + x], pixels[y * w + x + 2] = 255 - pixels[y * w + x + 2], 255 - pixels[y * w + x]
+			pixels[y * w + x + 0] = 255 - pixels[y * w + x + 0]
+			pixels[y * w + x + 1] = 255 - pixels[y * w + x + 1]
+			pixels[y * w + x + 2] = 255 - pixels[y * w + x + 2]
+		}
 	}
 
 	fmt.println("time:", time.since(start) / N)
-	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+	stbi.write_png("out.png", i32(w) / 3, i32(h), 3, raw_data(pixels), 0)
 
 	{
+		w := w / 3
+		scale.x /= 3
 		fontinfo: stbtt.fontinfo
 		stbtt.InitFont(&fontinfo, raw_data(font_data), 0)
 
 		start_time := time.now()
 		pixels     := make([^]u8, w * h)
 		for _ in 0 ..< N {
-			stbtt.MakeCodepointBitmap(&fontinfo, pixels, i32(w), i32(h), i32(w), FONT_SIZE / f32(font.cap_height), FONT_SIZE / f32(font.cap_height), CODEPOINT)
+			stbtt.MakeCodepointBitmap(&fontinfo, pixels, i32(w), i32(h), i32(w), scale.x, scale.y, CODEPOINT)
 		}
 		fmt.println("stb: ", time.since(start_time) / N)
 		stbi.write_png("stb.png", i32(w), i32(h), 1, pixels, 0)
