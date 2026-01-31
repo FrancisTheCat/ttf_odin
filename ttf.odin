@@ -10,6 +10,7 @@ import "core:slice/heap"
 import "core:strings"
 import "core:time"
 import "core:math"
+import la "core:math/linalg"
 import "core:prof/spall"
 import os "core:os/os2"
 
@@ -708,17 +709,21 @@ get_bitmap_size :: proc(font: Font, shape: Shape, scale: [2]f32) -> (w: int, h: 
 }
 
 render_shape_bitmap :: proc(
-	font:   Font,
-	shape:  Shape,
-	scale:  [2]f32,
-	pixels: []u8,
-	stride: int = -1,
+	font:     Font,
+	shape:    Shape,
+	scale:    [2]f32,
+	pixels:   []u8,
+	subpixel: bool = false,
+	stride:   int  = -1,
 ) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
-	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
-
-	w, h  := get_bitmap_size(font, shape, scale)
+	scale := scale
+	w, h := get_bitmap_size(font, shape, scale)
+	if subpixel {
+		scale.x *= 3
+		w       *= 3
+	}
 
 	stride := stride
 	if stride <= 0 {
@@ -743,7 +748,8 @@ render_shape_bitmap :: proc(
 		linears        := shape.linears
 	}
 
-	scanline := make([]u8, w, context.temp_allocator)
+	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
+	scanline      := make([]u8, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< y_samples {
 			render_y := (f32(y) + f32(y_sample) / f32(y_samples)) / scale.y + shape.min.y
@@ -819,54 +825,63 @@ render_shape_bitmap :: proc(
 				if int(start) == int(end) {
 					scanline[int(start)] += u8((end - start) * max_coverage)
 				} else {
-					scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
-					for x in int(start) + 1 ..< int(end) {
+					if int(start) > 0 {
+						scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
+					}
+					for x in max(int(start), 0) + 1 ..< min(int(end), w) {
 						scanline[x] += 255 / u8(y_samples)
 					}
-					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+					if int(end) < w {
+						scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+					}
 				}
 
 				current_intersection += 2
 			}
 		}
 
-		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w)
-		mem.zero(raw_data(scanline), w)
+		if subpixel {
+			for x in 0 ..< w {
+				acc: f32
+				acc += 1 * f32(scanline[clamp(x - 2, 0, w - 1)]) / 9
+				acc += 2 * f32(scanline[clamp(x - 1, 0, w - 1)]) / 9
+				acc += 3 * f32(scanline[clamp(x + 0, 0, w - 1)]) / 9
+				acc += 2 * f32(scanline[clamp(x + 1, 0, w - 1)]) / 9
+				acc += 1 * f32(scanline[clamp(x + 2, 0, w - 1)]) / 9
+				pixels[(h - y - 1) * stride + x] = u8(acc)
+			}
+		} else {
+			mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w)
+		}
+		slice.zero(scanline)
 	}
 }
 
-render_shape_packed :: proc(
-	font:      Font,
-	shape:     Shape,
-	font_size: f32,
-	pixels:    []u16,
-	stride:    int = -1,
+render_shape_coverage_mask :: proc(
+	font:   Font,
+	shape:  Shape,
+	scale:  [2]f32,
+	pixels: []u16,
+	stride: int = -1,
 ) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
 	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
-
-	scale := font_size / f32(font.units_per_em)
-	w, h  := get_bitmap_size(font, shape, font_size)
-
-	stride := stride
+	w, h          := get_bitmap_size(font, shape, scale)
+	stride        := stride
 	if stride <= 0 {
 		stride = w
 	}
 
 	assert(len(pixels) >= stride * h)
 
-	y_samples    := h < 10 ? 15 : 5
-	max_coverage := f32(255 / y_samples)
-	assert(255 % y_samples == 0)
-
 	beziers_start, beziers_end: int
 	linears_start, linears_end: int
 
-	scanline := make([]u8, w, context.temp_allocator)
+	scanline := make([]u16, w, context.temp_allocator)
 	for y in 0 ..< h {
 		for y_sample in 0 ..< 4 {
-			render_y := (f32(y) + f32(y_sample) / 4) / scale + shape.min.y
+			render_y := (f32(y) + f32(y_sample) / 4) / scale.y + shape.min.y
 
 			for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
 				beziers_start += 1
@@ -891,25 +906,19 @@ render_shape_packed :: proc(
 
 			current_intersection: int
 			for current_intersection < n - 1 {
-				start := (intersections[current_intersection + 0] - shape.min.x) * scale + 0.5
-				end   := (intersections[current_intersection + 1] - shape.min.x) * scale - 0.5
+				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * 4
+				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * 4
 
-				if int(start) == int(end) {
-					scanline[int(start)] += u8((end - start) * max_coverage)
-				} else {
-					scanline[int(start)] += u8((1 - start + f32(int(start))) * max_coverage)
-					for x in int(start) + 1 ..< int(end) {
-						scanline[x] += 255 / u8(y_samples)
-					}
-					scanline[int(end)] += u8((end - f32(int(end))) * max_coverage)
+				for x in max(int(start), 0) ..< min(int(end), w * 4) {
+					scanline[x / 4] |= 1 << uint(y_sample * 4 + x % 4)
 				}
 
 				current_intersection += 2
 			}
 		}
 
-		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w)
-		mem.zero(raw_data(scanline), w)
+		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w * size_of(u16))
+		slice.zero(scanline)
 	}
 }
 
@@ -938,38 +947,37 @@ main :: proc() {
 	start     := time.now()
 
 	glyph     := get_codepoint_glyph(font, CODEPOINT)
-	scale     := font_height_to_scale(font, FONT_SIZE) * [2]f32{ 3, 1, }
+	scale     := ([2]f32)(font_height_to_scale(font, FONT_SIZE))
 	shape     := get_glyph_shape(font, glyph)
 	w, h      := get_bitmap_size(font, shape, scale)
-	for w % 3 != 0 {
-		w += 1
-	}
 	pixels    := make([]u8, w * h)
 
-	N :: 1 << 10
+	N :: 1
 
 	for _ in 0 ..< N {
 		glyph := get_codepoint_glyph(font, CODEPOINT)
 		shape := get_glyph_shape(font, glyph)
-		render_shape_bitmap(font, shape, scale, pixels, w)
-	}
-
-	for y in 0 ..< h {
-		for x in 0 ..< w / 3 {
-			x := x * 3
-			// pixels[y * w + x], pixels[y * w + x + 2] = 255 - pixels[y * w + x + 2], 255 - pixels[y * w + x]
-			pixels[y * w + x + 0] = 255 - pixels[y * w + x + 0]
-			pixels[y * w + x + 1] = 255 - pixels[y * w + x + 1]
-			pixels[y * w + x + 2] = 255 - pixels[y * w + x + 2]
-		}
+		render_shape_bitmap(font, shape, scale, pixels)
 	}
 
 	fmt.println("time:", time.since(start) / N)
-	stbi.write_png("out.png", i32(w) / 3, i32(h), 3, raw_data(pixels), 0)
+	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+
+	pixels = make([]u8, w * h * 3)
+	render_shape_bitmap(font, shape, scale, pixels, subpixel = true)
+	stbi.write_png("sub.png", i32(w), i32(h), 3, raw_data(pixels), 0)
+
+	for &p in slice.reinterpret([][3]u8, pixels) {
+		end   := [3]f32{ .878, .42,  .455, }
+		start := [3]f32{ .898, .753, .478, }
+
+		v := la.array_cast(p, f32) / 255
+		v  = la.lerp(start, end, v)
+		p  = la.array_cast(v * 255.999, u8)
+	}
+	stbi.write_png("col.png", i32(w), i32(h), 3, raw_data(pixels), 0)
 
 	{
-		w := w / 3
-		scale.x /= 3
 		fontinfo: stbtt.fontinfo
 		stbtt.InitFont(&fontinfo, raw_data(font_data), 0)
 
