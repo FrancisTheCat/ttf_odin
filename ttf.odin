@@ -884,7 +884,31 @@ SAMPLING_PATTERN_DEFAULT :: Sampling_Pattern {
 	15 =  6,
 }
 
-sampling_mask_table_generate :: proc(pattern: Sampling_Pattern) -> (table: Sampling_Mask_Table) {
+SAMPLING_PATTERN_RGSS :: Sampling_Pattern {
+	 0 = 3,
+	 1 = 7,
+	 2 = 11,
+	 3 = 15,
+
+	 4 = 2,
+	 5 = 6,
+	 6 = 10,
+	 7 = 14,
+
+	 8 = 1,
+	 9 = 5,
+	10 = 9,
+	11 = 13,
+
+	12 = 0,
+	13 = 4,
+	14 = 8,
+	15 = 12,
+}
+
+SAMPLING_MASK_TABLE_DEFAULT := sampling_mask_table_generate(SAMPLING_PATTERN_DEFAULT)
+
+sampling_mask_table_generate :: proc "contextless" (pattern: Sampling_Pattern) -> (table: Sampling_Mask_Table) {
 	transposed: [16]u8
 	for p, i in pattern {
 		transposed[p] = u8(i)
@@ -921,8 +945,8 @@ render_shape_coverage_mask :: proc(
 
 	scanline := make([]u16, w, context.temp_allocator)
 	for y in 0 ..< h {
-		for y_sample in 0 ..< 4 {
-			render_y := (f32(y) + f32(y_sample) / 4) / scale.y + shape.min.y
+		for y_sample in 0 ..< 16 {
+			render_y := (f32(y) + f32(y_sample) / 16) / scale.y + shape.min.y
 
 			for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
 				beziers_start += 1
@@ -947,11 +971,11 @@ render_shape_coverage_mask :: proc(
 
 			current_intersection: int
 			for current_intersection < n - 1 {
-				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * 4
-				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * 4
-
-				for x in max(int(start), 0) ..< min(int(end), w * 4) {
-					scanline[x / 4] |= 1 << uint(y_sample * 4 + x % 4)
+				x_off := sampling_pattern[15 - y_sample]
+				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * 16 - f32(x_off)
+				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * 16 - f32(x_off)
+				for x in max(int(start), 0) ..< min(int(end), w * 16) {
+					scanline[x / 16] |= 1 << uint(15 - y_sample)
 				}
 
 				current_intersection += 2
@@ -973,15 +997,15 @@ main :: proc() {
 	spall_buffer = spall.buffer_create(buffer_backing)
 	defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-	FONT_SIZE :: 200
+	FONT_SIZE :: 100
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 	// FONT_PATH :: "/usr/share/fonts/inter/InterVariable.ttf"
 	// FONT_PATH :: "/usr/share/fonts/TTF/Inconsolata-Regular.ttf"
 	font_data := os.read_entire_file(FONT_PATH, context.temp_allocator) or_else panic("Failed to read font data")
 
 	// CODEPOINT :: ''
-	// CODEPOINT :: ''
-	CODEPOINT :: 'A'
+	CODEPOINT :: ''
+	// CODEPOINT :: 'A'
 
 	font      := load(font_data) or_else panic("Failed to load font")
 
@@ -992,6 +1016,9 @@ main :: proc() {
 	shape     := get_glyph_shape(font, glyph)
 	w, h      := get_bitmap_size(font, shape, scale)
 	pixels    := make([]u8, w * h)
+
+	// shape.linears = { { a = { 110, 110, }, b = { 230, 230, }, }, { a = { 120, 110, }, b = { 240, 230, }, }, }
+	// shape.beziers = {}
 
 	N :: 1
 
@@ -1017,6 +1044,54 @@ main :: proc() {
 		p  = la.array_cast(v * 255.999, u8)
 	}
 	stbi.write_png("col.png", i32(w), i32(h), 3, raw_data(pixels), 0)
+
+	sampling_pattern := SAMPLING_PATTERN_DEFAULT
+	mask_table       := sampling_mask_table_generate(sampling_pattern)
+	coverage         := make([]u16, (w +  1) * (h +  1))
+	pixels            = make([]u8,  (w * 16) * (h * 16))
+	render_shape_coverage_mask(font, shape, scale, coverage, w + 1, sampling_pattern)
+
+	for x_shift in 0 ..< 16 {
+		for y in 0 ..< h * 16 {
+			for x in 0 ..< w * 16 {
+				pixels[x + y * w * 16] = (x / 16 + y / 16) % 2 == 0 ? 64 : 32
+			}
+		}
+
+		for y in 0 ..< h {
+			for x in 0 ..< w {
+				c := transmute(bit_set[0 ..< 16; u16])coverage[x + y * (w + 1)]
+				for px, py in sampling_pattern {
+					pixels[int(px) + x * 16 + (py + y * 16) * w * 16] = 255 if py in c else 0
+				}
+			}
+		}
+		stbi.write_png("cov.png", i32(w * 16), i32(h * 16), 1, raw_data(pixels), 0)
+
+		slice.zero(pixels)
+		for y in 0 ..< h {
+			for x in 0 ..< w {
+				tl    := coverage[(x + 0) + (y + 0) * (w + 1)]
+				tr    := coverage[(x + 1) + (y + 0) * (w + 1)]
+				bl    := coverage[(x + 0) + (y + 1) * (w + 1)]
+				br    := coverage[(x + 1) + (y + 1) * (w + 1)]
+				xmask := mask_table[x_shift]
+				ymask := u16((1 << uint(0)) - 1)
+
+				result := (
+					tl & ~xmask & ~ymask |
+					tr &  xmask & ~ymask |
+					bl & ~xmask &  ymask |
+					br &  xmask &  ymask
+				)
+
+				coverage              := f32(intrinsics.count_ones(result)) / 16
+				pixels[x + y * w * 1] = u8(255.999 * coverage)
+			}
+		}
+
+		stbi.write_png(fmt.ctprintf("cov_%c.png", rune(x_shift + 'a')), i32(w * 1), i32(h * 1), 1, raw_data(pixels), 0)
+	}
 
 	{
 		fontinfo: stbtt.fontinfo
