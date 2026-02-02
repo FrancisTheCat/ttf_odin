@@ -857,12 +857,53 @@ render_shape_bitmap :: proc(
 	}
 }
 
+// TABLE[y] = x
+Sampling_Pattern    :: distinct [16]u8
+Sampling_Mask_Table :: distinct [16]u16
+
+// Randomly generated N-Rooks pattern with relatively good sample distribution and few bad alignments with angled lines
+SAMPLING_PATTERN_DEFAULT :: Sampling_Pattern {
+	 0 = 13,
+	 1 =  1,
+	 2 =  9,
+	 3 =  5,
+
+	 4 = 14,
+	 5 =  2,
+	 6 = 11,
+	 7 =  7,
+
+	 8 =  0,
+	 9 =  4,
+	10 = 12,
+	11 =  8,
+
+	12 = 15,
+	13 =  3,
+	14 = 10,
+	15 =  6,
+}
+
+sampling_mask_table_generate :: proc(pattern: Sampling_Pattern) -> (table: Sampling_Mask_Table) {
+	transposed: [16]u8
+	for p, i in pattern {
+		transposed[p] = u8(i)
+	}
+	mask: u16
+	for p, i in transposed {
+		mask    |= 1 << p
+		table[i] = mask
+	}
+	return
+}
+
 render_shape_coverage_mask :: proc(
 	font:   Font,
 	shape:  Shape,
 	scale:  [2]f32,
 	pixels: []u16,
-	stride: int = -1,
+	stride           := -1,
+	sampling_pattern := SAMPLING_PATTERN_DEFAULT,
 ) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
