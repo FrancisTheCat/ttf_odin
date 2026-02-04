@@ -623,6 +623,7 @@ get_intersections :: proc(
 	return
 }
 
+@(require_results)
 get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 
@@ -696,10 +697,12 @@ get_codepoint_glyph :: proc(font: Font, codepoint: rune) -> Glyph {
 	return 0
 }
 
+@(require_results)
 font_height_to_scale :: proc(font: Font, font_height: f32) -> f32 {
 	return font_height / f32(font.cap_height)
 }
 
+@(require_results)
 get_bitmap_size :: proc(font: Font, shape: Shape, scale: [2]f32) -> (w: int, h: int) {
 	min   := shape.min * scale
 	max   := shape.max * scale
@@ -997,7 +1000,7 @@ main :: proc() {
 	spall_buffer = spall.buffer_create(buffer_backing)
 	defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-	FONT_SIZE :: 100
+	FONT_SIZE :: 20
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 	// FONT_PATH :: "/usr/share/fonts/inter/InterVariable.ttf"
 	// FONT_PATH :: "/usr/share/fonts/TTF/Inconsolata-Regular.ttf"
@@ -1006,6 +1009,7 @@ main :: proc() {
 	// CODEPOINT :: ''
 	CODEPOINT :: ''
 	// CODEPOINT :: 'A'
+	// CODEPOINT :: 'T'
 
 	font      := load(font_data) or_else panic("Failed to load font")
 
@@ -1016,9 +1020,6 @@ main :: proc() {
 	shape     := get_glyph_shape(font, glyph)
 	w, h      := get_bitmap_size(font, shape, scale)
 	pixels    := make([]u8, w * h)
-
-	// shape.linears = { { a = { 110, 110, }, b = { 230, 230, }, }, { a = { 120, 110, }, b = { 240, 230, }, }, }
-	// shape.beziers = {}
 
 	N :: 1
 
@@ -1085,8 +1086,8 @@ main :: proc() {
 					br &  xmask &  ymask
 				)
 
-				coverage              := f32(intrinsics.count_ones(result)) / 16
-				pixels[x + y * w * 1] = u8(255.999 * coverage)
+				coverage         := f32(intrinsics.count_ones(result)) / 16
+				pixels[x + y * w] = u8(255.999 * coverage)
 			}
 		}
 
