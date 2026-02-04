@@ -1,8 +1,23 @@
 layout (location = 0) in vec2 a_position;
 
 layout (location = 0) out vec2 v_position;
+layout (location = 1) out vec2 v_tex_coord;
+
+uniform vec2 u_scale = vec2(1);
 
 void main() {
-    v_position  = a_position;
+    switch (gl_VertexID % 3) {
+    case 0: {
+        v_tex_coord = vec2(0);
+    } break;
+    case 1: {
+        v_tex_coord = vec2(0.5, 0);
+    } break;
+    case 2: {
+        v_tex_coord = vec2(1);
+    } break;
+    }
+
+    v_position  = u_scale * a_position;
     gl_Position = vec4(v_position * 2 - 1, 0, 1);
 }
