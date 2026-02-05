@@ -3,7 +3,7 @@ layout (location = 0) in vec2 a_position;
 layout (location = 0) out vec2 v_position;
 layout (location = 1) out vec2 v_tex_coord;
 
-uniform vec2 u_scale = vec2(1);
+uniform mat3 u_transform = mat3(1);
 
 void main() {
     switch (gl_VertexID % 3) {
@@ -18,6 +18,6 @@ void main() {
     } break;
     }
 
-    v_position  = u_scale * a_position;
+    v_position  = (u_transform * vec3(a_position, 1)).xy;
     gl_Position = vec4(v_position * 2 - 1, 0, 1);
 }

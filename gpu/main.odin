@@ -9,8 +9,11 @@ import "glodin"
 
 import ttf ".."
 
+SAMPLES  :: 8
+SUBPIXEL :: true
+
 main :: proc() {
-	FONT_SIZE :: 500
+	FONT_SIZE :: 1000
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 
 	font, ok := ttf.load(#load(FONT_PATH))
@@ -22,7 +25,6 @@ main :: proc() {
 	shape := ttf.get_glyph_shape(font, glyph)
 	scale := ttf.font_height_to_scale(font, FONT_SIZE)
 
-	SAMPLES :: 4
 	w := 900
 	h := 600
 
@@ -30,27 +32,26 @@ main :: proc() {
 	window := glfw.CreateWindow(i32(w), i32(h), "TTF", nil, nil)
 	defer glfw.DestroyWindow(window)
 
-
 	glodin.init_glfw(window)
 	defer glodin.uninit()
 
 	glfw.SwapInterval(0)
-	glodin.window_size_callback(w, h)
 
 	Vertex :: struct {
 		position: [2]f32,
 	}
+
 	vertex_buffer := make([]Vertex, len(shape.linears) * 3 + len(shape.beziers) * 3, context.temp_allocator)
 	for linear, i in shape.linears {
-		vertex_buffer[i * 3 + 0].position = (shape.min + shape.max) * scale * 0.5
-		vertex_buffer[i * 3 + 1].position = linear.a * scale
-		vertex_buffer[i * 3 + 2].position = linear.b * scale
+		vertex_buffer[i * 3 + 0].position = (shape.min + shape.max) * 0.5
+		vertex_buffer[i * 3 + 1].position = linear.a
+		vertex_buffer[i * 3 + 2].position = linear.b
 	}
 	for bezier, i in shape.beziers {
 		i                                := i + len(shape.linears)
-		vertex_buffer[i * 3 + 0].position = (shape.min + shape.max) * scale * 0.5
-		vertex_buffer[i * 3 + 1].position = bezier.p0 * scale
-		vertex_buffer[i * 3 + 2].position = bezier.p2 * scale
+		vertex_buffer[i * 3 + 0].position = (shape.min + shape.max) * 0.5
+		vertex_buffer[i * 3 + 1].position = bezier.p0
+		vertex_buffer[i * 3 + 2].position = bezier.p2
 	}
 
 	mesh := glodin.create_mesh(vertex_buffer)
@@ -58,9 +59,9 @@ main :: proc() {
 
 	vertex_buffer = vertex_buffer[:len(shape.beziers) * 3]
 	for bezier, i in shape.beziers {
-		vertex_buffer[i * 3 + 0].position = bezier.p0 * scale
-		vertex_buffer[i * 3 + 1].position = bezier.p1 * scale
-		vertex_buffer[i * 3 + 2].position = bezier.p2 * scale
+		vertex_buffer[i * 3 + 0].position = bezier.p0
+		vertex_buffer[i * 3 + 1].position = bezier.p1
+		vertex_buffer[i * 3 + 2].position = bezier.p2
 	}
 
 	bezier_mesh := glodin.create_mesh(vertex_buffer)
@@ -82,20 +83,40 @@ main :: proc() {
 	stencil_program := glodin.create_program_source(#load("vertex.glsl"), #load("fragment.glsl")) or_else panic("Failed to compile program")
 	defer glodin.destroy(stencil_program)
 
-	resolve_program := glodin.create_program_source(#load("vertex.glsl"), #load("resolve.glsl")) or_else panic("Failed to compile program")
+	when SUBPIXEL {
+		resolve_program := glodin.create_program_source(#load("vertex.glsl"), #load("subpixel.glsl")) or_else panic("Failed to compile program")
+	} else {
+		resolve_program := glodin.create_program_source(#load("vertex.glsl"), #load("resolve.glsl")) or_else panic("Failed to compile program")
+	}
 	defer glodin.destroy(resolve_program)
 
-	stencil_texture := glodin.create_texture(w, h, format  = .Stencil8, samples = SAMPLES)
+	stencil_texture := glodin.create_texture(w * 3, h, format = .Stencil8, samples = SAMPLES)
 	defer glodin.destroy(stencil_texture)
 
-	fb := glodin.create_framebuffer({}, stencil_texture = stencil_texture)
+	// add a color texture to prevent renderdoc from shitting itself
+	when ODIN_DEBUG {
+		color_texture := glodin.create_texture(w * 3, h, format = .RGBA8, samples = SAMPLES)
+		defer glodin.destroy(color_texture)
+		color_textures := []glodin.Texture { color_texture, }
+	} else {
+		color_textures := []glodin.Texture {}
+	}
+
+	fb := glodin.create_framebuffer(color_textures, stencil_texture = stencil_texture)
 	defer glodin.destroy(fb)
 
 	glodin.set_uniforms(resolve_program, {
-		{ "u_stencil_texture", stencil_texture,             },
-		{ "u_resolution",      [2]f32{ f32(w), f32(h),   }, },
-		{ "u_color",           [4]f32{ 0.9, 0.9, 0.9, 1, }, },
-		{ "u_samples",         u32(SAMPLES),                },
+		{ "u_stencil_texture", stencil_texture,           },
+		{ "u_resolution",      [2]f32{ f32(w), f32(h), }, },
+		{ "u_color",           [3]f32{ 0.9, 0.9, 0.9,  }, },
+		{ "u_background",      [3]f32{ 0.1, 0.1, 0.1,  }, },
+		{ "u_samples",         u32(SAMPLES),              },
+	})
+
+	glodin.set_uniform(stencil_program, "u_transform", matrix[3, 3]f32{
+		scale / f32(w),              0, 0,
+		             0, scale / f32(h), 0,
+		             0,              0, 0,
 	})
 
 	glodin.enable(.Stencil_Test)
@@ -123,14 +144,33 @@ main :: proc() {
 				w = int(new_w)
 				h = int(new_h)
 
-				stencil_texture = glodin.create_texture(w, h, format  = .Stencil8, samples = SAMPLES)
-				fb              = glodin.create_framebuffer({}, stencil_texture = stencil_texture)
+				render_width := w
+				if SUBPIXEL {
+					render_width *= 3
+				}
+
+				stencil_texture = glodin.create_texture(render_width, h, format = .Stencil8, samples = SAMPLES)
+
+				when ODIN_DEBUG {
+					glodin.destroy(color_texture)
+
+					color_texture  = glodin.create_texture(render_width, h, format = .RGBA8, samples = SAMPLES)
+					color_textures = []glodin.Texture { color_texture, }
+				} else {
+					color_textures = []glodin.Texture {}
+				}
+
+				fb = glodin.create_framebuffer(color_textures, stencil_texture = stencil_texture)
 
 				glodin.set_uniforms(resolve_program, {
 					{ "u_stencil_texture", stencil_texture,           },
 					{ "u_resolution",      [2]f32{ f32(w), f32(h), }, },
 				})
-				glodin.set_uniform(stencil_program, "u_scale", 1 / [2]f32{ f32(w), f32(h), })
+				glodin.set_uniform(stencil_program, "u_transform", matrix[3, 3]f32{
+					scale / f32(w),              0, 0,
+					             0, scale / f32(h), 0,
+					             0,              0, 0,
+				})
 			}
 		}
 
