@@ -111,7 +111,6 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 
 	for &table in tables {
 		name := strings.truncate_to_byte(string(table.tableTag[:]), 0)
-		fmt.println(name)
 		switch name {
 		case "maxp":
 			Maxp_Table :: struct {
@@ -980,34 +979,27 @@ render_shape_bitmap :: proc(
 	}
 }
 
-// TABLE[y] = x
-Sampling_Pattern    :: distinct [16]u8
-Sampling_Mask_Table :: distinct [16]u16
-
 // Randomly generated N-Rooks pattern with relatively good sample distribution and few bad alignments with angled lines
-SAMPLING_PATTERN_DEFAULT :: Sampling_Pattern {
+SAMPLING_PATTERN_16_DEFAULT :: [16]int {
 	 0 = 13,
 	 1 =  1,
 	 2 =  9,
 	 3 =  5,
-
 	 4 = 14,
 	 5 =  2,
 	 6 = 11,
 	 7 =  7,
-
 	 8 =  0,
 	 9 =  4,
 	10 = 12,
 	11 =  8,
-
 	12 = 15,
 	13 =  3,
 	14 = 10,
 	15 =  6,
 }
 
-SAMPLING_PATTERN_RGSS :: Sampling_Pattern {
+SAMPLING_PATTERN_16_RGSS :: [16]int {
 	 0 = 3,
 	 1 = 7,
 	 2 = 11,
@@ -1029,30 +1021,41 @@ SAMPLING_PATTERN_RGSS :: Sampling_Pattern {
 	15 = 12,
 }
 
-SAMPLING_MASK_TABLE_DEFAULT := sampling_mask_table_generate(SAMPLING_PATTERN_DEFAULT)
+SAMPLING_PATTERN_8_DEFAULT :: [8]int {
+	 0 = 4,
+	 1 = 1,
+	 2 = 6,
+	 3 = 3,
+	 4 = 0,
+	 5 = 5,
+	 6 = 2,
+	 7 = 7,
+}
 
-sampling_mask_table_generate :: proc "contextless" (pattern: Sampling_Pattern) -> (table: Sampling_Mask_Table) {
-	transposed: [16]u8
+sampling_mask_table_generate :: proc "contextless" (pattern: [$N]int) -> (table: [N]bit_set[0 ..< len(pattern)]) {
+	transposed: [N]int
 	for p, i in pattern {
-		transposed[p] = u8(i)
+		transposed[p] = i
 	}
-	mask: u16
+	mask: type_of(table[0])
 	for p, i in transposed {
-		mask    |= 1 << p
+		mask    |= { p, }
 		table[i] = mask
 	}
 	return
 }
 
 render_shape_coverage_mask :: proc(
-	font:   Font,
-	shape:  Shape,
-	scale:  [2]f32,
-	pixels: []u16,
-	stride           := -1,
-	sampling_pattern := SAMPLING_PATTERN_DEFAULT,
+	font:             Font,
+	shape:            Shape,
+	scale:            [2]f32,
+	sampling_pattern: [$N]int,
+	pixels:           []bit_set[0 ..< len(sampling_pattern)],
+	stride := -1,
 ) {
 	spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+
+	P :: type_of(pixels[0])
 
 	intersections := make([]f32, len(shape.linears) + len(shape.beziers), context.temp_allocator)
 	w, h          := get_bitmap_size(font, shape, scale)
@@ -1066,10 +1069,10 @@ render_shape_coverage_mask :: proc(
 	beziers_start, beziers_end: int
 	linears_start, linears_end: int
 
-	scanline := make([]u16, w, context.temp_allocator)
+	scanline := make([]P, w, context.temp_allocator)
 	for y in 0 ..< h {
-		for y_sample in 0 ..< 16 {
-			render_y := (f32(y) + f32(y_sample) / 16) / scale.y + shape.min.y
+		for y_sample in 0 ..< N {
+			render_y := (f32(y) + f32(y_sample) / N) / scale.y + shape.min.y
 
 			for beziers_start < len(shape.beziers) && shape.beziers[beziers_start].p2.y <= render_y {
 				beziers_start += 1
@@ -1094,18 +1097,18 @@ render_shape_coverage_mask :: proc(
 
 			current_intersection: int
 			for current_intersection < n - 1 {
-				x_off := sampling_pattern[15 - y_sample]
-				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * 16 - f32(x_off)
-				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * 16 - f32(x_off)
-				for x in max(int(start), 0) ..< min(int(end), w * 16) {
-					scanline[x / 16] |= 1 << uint(15 - y_sample)
+				x_off := sampling_pattern[N - 1 - y_sample]
+				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * N - f32(x_off)
+				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * N - f32(x_off)
+				for x in max(int(start), 0) ..< min(int(end), w * N) {
+					scanline[x / N] |= { N - 1 - y_sample, }
 				}
 
 				current_intersection += 2
 			}
 		}
 
-		mem.copy(&pixels[(h - y - 1) * stride], raw_data(scanline), w * size_of(u16))
+		copy(pixels[(h - y - 1) * stride:], scanline)
 		slice.zero(scanline)
 	}
 }
@@ -1120,7 +1123,7 @@ main :: proc() {
 	spall_buffer = spall.buffer_create(buffer_backing)
 	defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-	FONT_SIZE :: 20
+	FONT_SIZE :: 100
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 	// FONT_PATH :: "/usr/share/fonts/inter/InterVariable.ttf"
 	// FONT_PATH :: "/usr/share/fonts/TTF/Inconsolata-Regular.ttf"
@@ -1141,53 +1144,58 @@ main :: proc() {
 	w, h      := get_bitmap_size(font, shape, scale)
 	pixels    := make([]u8, w * h)
 
-	N :: 1
+	{
+		N :: 1
 
-	for _ in 0 ..< N {
-		glyph := get_codepoint_glyph(font, CODEPOINT)
-		shape := get_glyph_shape(font, glyph)
-		render_shape_bitmap(font, shape, scale, pixels)
+		for _ in 0 ..< N {
+			glyph := get_codepoint_glyph(font, CODEPOINT)
+			shape := get_glyph_shape(font, glyph)
+			render_shape_bitmap(font, shape, scale, pixels)
+		}
+
+		fmt.println("time:", time.since(start) / N)
+		stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+
+		pixels = make([]u8, w * h * 3)
+		render_shape_bitmap(font, shape, scale, pixels, subpixel = true)
+		stbi.write_png("sub.png", i32(w), i32(h), 3, raw_data(pixels), 0)
+
+		for &p in slice.reinterpret([][3]u8, pixels) {
+			end   := [3]f32{ .878, .42,  .455, }
+			start := [3]f32{ .898, .753, .478, }
+
+			v := la.array_cast(p, f32) / 255
+			v  = la.lerp(start, end, v)
+			p  = la.array_cast(v * 255.999, u8)
+		}
+		stbi.write_png("col.png", i32(w), i32(h), 3, raw_data(pixels), 0)
 	}
 
-	fmt.println("time:", time.since(start) / N)
-	stbi.write_png("out.png", i32(w), i32(h), 1, raw_data(pixels), 0)
+	SAMPLING_PATTERN :: SAMPLING_PATTERN_16_DEFAULT
+	N                :: len(SAMPLING_PATTERN)
+	P                :: bit_set[0 ..< N]
 
-	pixels = make([]u8, w * h * 3)
-	render_shape_bitmap(font, shape, scale, pixels, subpixel = true)
-	stbi.write_png("sub.png", i32(w), i32(h), 3, raw_data(pixels), 0)
+	mask_table       := sampling_mask_table_generate(SAMPLING_PATTERN)
+	coverage         := make([]P,  (w + 1) * (h + 1))
+	pixels            = make([]u8, (w * N) * (h * N))
+	render_shape_coverage_mask(font, shape, scale, SAMPLING_PATTERN, coverage, w + 1)
 
-	for &p in slice.reinterpret([][3]u8, pixels) {
-		end   := [3]f32{ .878, .42,  .455, }
-		start := [3]f32{ .898, .753, .478, }
-
-		v := la.array_cast(p, f32) / 255
-		v  = la.lerp(start, end, v)
-		p  = la.array_cast(v * 255.999, u8)
-	}
-	stbi.write_png("col.png", i32(w), i32(h), 3, raw_data(pixels), 0)
-
-	sampling_pattern := SAMPLING_PATTERN_DEFAULT
-	mask_table       := sampling_mask_table_generate(sampling_pattern)
-	coverage         := make([]u16, (w +  1) * (h +  1))
-	pixels            = make([]u8,  (w * 16) * (h * 16))
-	render_shape_coverage_mask(font, shape, scale, coverage, w + 1, sampling_pattern)
-
-	for x_shift in 0 ..< 16 {
-		for y in 0 ..< h * 16 {
-			for x in 0 ..< w * 16 {
-				pixels[x + y * w * 16] = (x / 16 + y / 16) % 2 == 0 ? 64 : 32
+	for x_shift in 0 ..< N {
+		for y in 0 ..< h * N {
+			for x in 0 ..< w * N {
+				pixels[x + y * w * N] = (x / N + y / N) % 2 == 0 ? 64 : 32
 			}
 		}
 
 		for y in 0 ..< h {
 			for x in 0 ..< w {
-				c := transmute(bit_set[0 ..< 16; u16])coverage[x + y * (w + 1)]
-				for px, py in sampling_pattern {
-					pixels[int(px) + x * 16 + (py + y * 16) * w * 16] = 255 if py in c else 0
+				c := coverage[x + y * (w + 1)]
+				for px, py in SAMPLING_PATTERN {
+					pixels[int(px) + x * N + (py + y * N) * w * N] = 255 if py in c else 0
 				}
 			}
 		}
-		stbi.write_png("cov.png", i32(w * 16), i32(h * 16), 1, raw_data(pixels), 0)
+		stbi.write_png("cov.png", i32(w * N), i32(h * N), 1, raw_data(pixels), 0)
 
 		slice.zero(pixels)
 		for y in 0 ..< h {
@@ -1197,7 +1205,7 @@ main :: proc() {
 				bl    := coverage[(x + 0) + (y + 1) * (w + 1)]
 				br    := coverage[(x + 1) + (y + 1) * (w + 1)]
 				xmask := mask_table[x_shift]
-				ymask := u16((1 << uint(0)) - 1)
+				ymask := transmute(P)(intrinsics.type_bit_set_underlying_type(P)((1 << uint(0)) - 1))
 
 				result := (
 					tl & ~xmask & ~ymask |
@@ -1206,12 +1214,12 @@ main :: proc() {
 					br &  xmask &  ymask
 				)
 
-				coverage         := f32(intrinsics.count_ones(result)) / 16
+				coverage         := f32(card(result)) / N
 				pixels[x + y * w] = u8(255.999 * coverage)
 			}
 		}
 
-		stbi.write_png(fmt.ctprintf("cov_%c.png", rune(x_shift + 'a')), i32(w * 1), i32(h * 1), 1, raw_data(pixels), 0)
+		stbi.write_png(fmt.ctprintf("cov_%c.png", rune(x_shift + 'a')), i32(w), i32(h), 1, raw_data(pixels), 0)
 	}
 
 	{

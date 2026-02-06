@@ -24,7 +24,6 @@ main :: proc() {
 	// CODEPOINT :: 'ö'
 	// CODEPOINT :: ''
 	glyph := ttf.get_codepoint_glyph(font, CODEPOINT)
-	fmt.println(glyph)
 	shape := ttf.get_glyph_shape(font, glyph)
 	scale := ttf.font_height_to_scale(font, FONT_SIZE)
 
@@ -44,7 +43,7 @@ main :: proc() {
 		position: [2]f32,
 	}
 
-	vertex_buffer := make([]Vertex, len(shape.linears) * 3 + len(shape.beziers) * 3, context.temp_allocator)
+	vertex_buffer := make([]Vertex, (len(shape.linears) + len(shape.beziers)) * 3, context.temp_allocator)
 	for linear, i in shape.linears {
 		vertex_buffer[i * 3 + 0].position = (shape.min + shape.max) * 0.5
 		vertex_buffer[i * 3 + 1].position = linear.a
@@ -69,6 +68,10 @@ main :: proc() {
 
 	bezier_mesh := glodin.create_mesh(vertex_buffer)
 	defer glodin.destroy(bezier_mesh)
+
+	if len(vertex_buffer) < 6 {
+		vertex_buffer = make([]Vertex, 6, context.temp_allocator)
+	}
 
 	vertex_buffer[0] = { { 0, 0, }, }
 	vertex_buffer[1] = { { 0, 1, }, }
@@ -193,11 +196,9 @@ main :: proc() {
 		glodin.draw(fb, stencil_program, mesh)
 
 		glodin.enable(.Sample_Shading)
-
 		glodin.set_uniform(stencil_program, "u_bezier", true)
 		glodin.draw(fb, stencil_program, bezier_mesh)
 		glodin.set_uniform(stencil_program, "u_bezier", false)
-
 		glodin.disable(.Sample_Shading)
 
 		glodin.draw({}, resolve_program, quad)
