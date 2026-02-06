@@ -489,7 +489,127 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 			current = end + 1
 		}
 	} else {
-		unimplemented()
+		Component_Glyph_Flag :: enum {
+			ARG_1_AND_2_ARE_WORDS     = intrinsics.constant_log2(0x0001),
+			ARGS_ARE_XY_VALUES        = intrinsics.constant_log2(0x0002),
+			ROUND_XY_TO_GRID          = intrinsics.constant_log2(0x0004),
+			WE_HAVE_A_SCALE           = intrinsics.constant_log2(0x0008),
+			MORE_COMPONENTS           = intrinsics.constant_log2(0x0020),
+			WE_HAVE_AN_X_AND_Y_SCALE  = intrinsics.constant_log2(0x0040),
+			WE_HAVE_A_TWO_BY_TWO      = intrinsics.constant_log2(0x0080),
+			WE_HAVE_INSTRUCTIONS      = intrinsics.constant_log2(0x0100),
+			USE_MY_METRICS            = intrinsics.constant_log2(0x0200),
+			OVERLAP_COMPOUND          = intrinsics.constant_log2(0x0400),
+			SCALED_COMPONENT_OFFSET   = intrinsics.constant_log2(0x0800),
+			UNSCALED_COMPONENT_OFFSET = intrinsics.constant_log2(0x1000),
+	    }
+		Component_Glyph_Flags :: bit_set[Component_Glyph_Flag; u16be]
+
+		flags := Component_Glyph_Flags { .MORE_COMPONENTS, }
+		data  := ([^]u16be)(([^]byte)(glyph_header)[size_of(glyph_header^):])
+
+		for (.MORE_COMPONENTS in flags) {
+			flags        = transmute(Component_Glyph_Flags)data[0]
+			glyph_index := Glyph(data[1])
+			data         = data[2:]
+
+			subshape := get_glyph_shape(font, glyph_index, allocator)
+
+			if .ARGS_ARE_XY_VALUES in flags {
+				args: [2]f32
+				if .ARG_1_AND_2_ARE_WORDS in flags {
+					args[0] = f32(i16be(data[0]))
+					args[1] = f32(i16be(data[1]))
+					data    = data[2:]
+				} else {
+					args8  := transmute([2]i8)data[0]
+					data    = data[1:]
+					args[0] = f32(args8[0])
+					args[1] = f32(args8[1])
+				}
+
+				for &bezier in subshape.beziers {
+					bezier.p0[0] += f32(args[0])
+					bezier.p0[1] += f32(args[1])
+
+					bezier.p1[0] += f32(args[0])
+					bezier.p1[1] += f32(args[1])
+
+					bezier.p2[0] += f32(args[0])
+					bezier.p2[1] += f32(args[1])
+				}
+
+				for &linear in subshape.linears {
+					linear.a[0] += f32(args[0])
+					linear.a[1] += f32(args[1])
+
+					linear.b[0] += f32(args[0])
+					linear.b[1] += f32(args[1])
+				}
+			}
+
+			if .WE_HAVE_A_SCALE in flags {
+				scale := f32(i16be(data[0])) / (1 << 14)
+				data   = data[1:]
+
+				for &bezier in subshape.beziers {
+					bezier.p0 *= scale
+					bezier.p1 *= scale
+					bezier.p2 *= scale
+				}
+				for &linear in subshape.linears {
+					linear.a *= scale
+					linear.b *= scale
+				}
+			}
+			if .WE_HAVE_AN_X_AND_Y_SCALE in flags {
+				scale_x := i16be(data[0])
+				scale_y := i16be(data[1])
+				data     = data[2:]
+
+				scale := [2]f32 {
+					f32(scale_x),
+					f32(scale_y),
+				} / (1 << 14)
+
+				for &bezier in subshape.beziers {
+					bezier.p0 *= scale
+					bezier.p1 *= scale
+					bezier.p2 *= scale
+				}
+				for &linear in subshape.linears {
+					linear.a *= scale
+					linear.b *= scale
+				}
+			}
+			if .WE_HAVE_A_TWO_BY_TWO in flags {
+				values: [4]u16be
+				mem.copy(&values, data, size_of(values))
+				data = data[4:]
+
+				mat: matrix[2, 2]f32
+				for i in 0 ..< 4 {
+					mat[i / 2, i % 2] = f32(values[i]) / (1 << 14)
+				}
+
+				for &bezier in subshape.beziers {
+					bezier.p0 *= mat
+					bezier.p1 *= mat
+					bezier.p2 *= mat
+				}
+				for &linear in subshape.linears {
+					linear.a *= mat
+					linear.b *= mat
+				}
+			}
+			if .WE_HAVE_INSTRUCTIONS in flags {
+				n_instructions := u16be(data[0])
+				data            = data[1 + n_instructions:]
+			}
+
+			append(&beziers, ..subshape.beziers[:])
+			append(&linears, ..subshape.linears[:])
+		}
 	}
 
 	{

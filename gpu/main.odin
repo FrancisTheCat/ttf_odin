@@ -2,6 +2,7 @@ package gpu_text
 
 import "core:fmt"
 import "core:time"
+import "core:math"
 
 import "vendor:glfw"
 
@@ -10,18 +11,20 @@ import "glodin"
 import ttf ".."
 
 SAMPLES  :: 8
-SUBPIXEL :: true
+SUBPIXEL :: false
 
 main :: proc() {
-	FONT_SIZE :: 1000
+	FONT_SIZE :: 500
 	FONT_PATH :: "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"
 
 	font, ok := ttf.load(#load(FONT_PATH))
 	assert(ok)
 
 	CODEPOINT :: ''
+	// CODEPOINT :: 'ö'
 	// CODEPOINT :: ''
 	glyph := ttf.get_codepoint_glyph(font, CODEPOINT)
+	fmt.println(glyph)
 	shape := ttf.get_glyph_shape(font, glyph)
 	scale := ttf.font_height_to_scale(font, FONT_SIZE)
 
@@ -66,8 +69,6 @@ main :: proc() {
 
 	bezier_mesh := glodin.create_mesh(vertex_buffer)
 	defer glodin.destroy(bezier_mesh)
-
-	vertex_buffer = make([]Vertex, len(shape.linears) * 2 + 1, context.temp_allocator)
 
 	vertex_buffer[0] = { { 0, 0, }, }
 	vertex_buffer[1] = { { 0, 1, }, }
@@ -127,6 +128,8 @@ main :: proc() {
 	print_time := time.now()
 	print_frames: int
 
+	start_time := time.now()
+
 	for !glfw.WindowShouldClose(window) {
 		if time.since(print_time) > time.Second {
 			glfw.SetWindowTitle(window, fmt.ctprint(print_frames))
@@ -166,13 +169,25 @@ main :: proc() {
 					{ "u_stencil_texture", stencil_texture,           },
 					{ "u_resolution",      [2]f32{ f32(w), f32(h), }, },
 				})
-				glodin.set_uniform(stencil_program, "u_transform", matrix[3, 3]f32{
-					scale / f32(w),              0, 0,
-					             0, scale / f32(h), 0,
-					             0,              0, 0,
-				})
 			}
 		}
+
+		current_time := f32(time.duration_seconds(time.since(start_time)))
+
+		scale_x := scale / (shape.max.x - shape.min.x)
+		scale_y := scale / (shape.max.y - shape.min.y)
+
+		sx := (shape.min.x + shape.max.x) * 0.5
+		sy := (shape.min.y + shape.max.y) * 0.5
+
+		c := math.cos(current_time)
+
+		transform := matrix[3, 3]f32 {
+		    c * scale_x,          0,  0.5 - c * sx * scale_x,
+		              0, scale_y,     0.5 - sy * scale_y,
+		              0,          0,  1,
+		}
+		glodin.set_uniform(stencil_program, "u_transform", transform)
 
 		glodin.clear_stencil(fb, 0)
 		glodin.draw(fb, stencil_program, mesh)
@@ -185,7 +200,6 @@ main :: proc() {
 
 		glodin.disable(.Sample_Shading)
 
-		glodin.clear_color({}, { 0.1, 0.1, 0.1, 1, })
 		glodin.draw({}, resolve_program, quad)
 
 		glfw.SwapBuffers(window)
