@@ -12,7 +12,7 @@ import "core:time"
 import "core:math"
 import la "core:math/linalg"
 import "core:prof/spall"
-import os "core:os/os2"
+import "core:os"
 
 import stbi  "vendor:stb/image"
 import stbtt "vendor:stb/truetype"
