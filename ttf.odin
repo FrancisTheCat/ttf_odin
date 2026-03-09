@@ -30,17 +30,19 @@ File_Header :: struct {
 }
 
 Font :: struct {
-	data:         []byte,
-	glyph_count:  int,
-	units_per_em: int,
-	loca_offset:  int,
-	glyf_offset:  int,
-	cmap_offset:  int,
-	cmap_record:  ^Cmap_Encoding_Record,
-	loca_32_bit:  bool,
-	ascender:     int,
-	descender:    int,
-	cap_height:   int,
+	data:          []byte,
+	glyph_count:   int,
+	units_per_em:  int,
+	loca_offset:   int,
+	glyf_offset:   int,
+	hmtx_offset:   int,
+	cmap_offset:   int,
+	cmap_record:   ^Cmap_Encoding_Record,
+	loca_32_bit:   bool,
+	ascender:      int,
+	descender:     int,
+	cap_height:    int,
+	hmetric_count: int,
 }
 
 Cmap_Platform_Id :: enum u16be {
@@ -167,6 +169,7 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 			hhea_table := (^Hhea_Table)(&data[table.offset])
 			if font.ascender  == 0 do font.ascender  = int(hhea_table.ascender)
 			if font.descender == 0 do font.descender = int(hhea_table.descender)
+			font.hmetric_count = int(hhea_table.numberOfHMetrics)
 		case "OS/2":
 			OS2_Table :: struct #packed {
 				version:                 u16be,
@@ -244,6 +247,8 @@ load :: proc(data: []byte) -> (font: Font, ok: bool) {
 
 			assert(record != nil)
 			font.cmap_record = record
+		case "hmtx":
+			font.hmtx_offset = int(table.offset)
 		}
 	}
 	
@@ -1110,6 +1115,23 @@ render_shape_coverage_mask :: proc(
 
 		copy(pixels[(h - y - 1) * stride:], scanline)
 		slice.zero(scanline)
+	}
+}
+
+@(require_results)
+get_glyph_horizontal_metrics :: proc(font: Font, glyph: Glyph) -> (x_advance, left_bearing: int) {
+	Record :: struct {
+		advanceWidth: u16be,
+		lsb:          i16be,
+	}
+	records := ([^]Record)(&font.data[font.hmtx_offset])
+	lsbs    := ([^]i16be )(records[font.hmetric_count:])
+
+	if int(glyph) < font.hmetric_count {
+		record := records[glyph]
+		return int(record.advanceWidth), int(record.lsb)
+	} else {
+		return int(records[font.hmetric_count - 1].advanceWidth), int(lsbs[int(glyph) - font.hmetric_count])
 	}
 }
 
