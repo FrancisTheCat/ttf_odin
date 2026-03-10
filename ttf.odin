@@ -517,7 +517,7 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 			glyph_index := Glyph(data[1])
 			data         = data[2:]
 
-			subshape := get_glyph_shape(font, glyph_index, allocator)
+			subshape := get_glyph_shape(font, glyph_index, context.temp_allocator)
 
 			if .ARGS_ARE_XY_VALUES in flags {
 				args: [2]f32
