@@ -326,8 +326,8 @@ get_glyph_shape :: proc(font: Font, glyph: Glyph, allocator := context.allocator
 		n_points           := int(end_points[glyph_header.numberOfContours - 1] + 1)
 		points             := description[int(glyph_header.numberOfContours) * size_of(u16be) + size_of(u16be) + int(instruction_length):]
 
-		reserve(&linears, n_points)
-		reserve(&beziers, n_points)
+		reserve(&linears, n_points + 1)
+		reserve(&beziers, n_points + 1)
 
 		linears.allocator = mem.panic_allocator()
 		beziers.allocator = mem.panic_allocator()
