@@ -6,7 +6,7 @@ import "core:math"
 
 import "vendor:glfw"
 
-import "glodin"
+import "../vendor/glodin"
 
 import ttf ".."
 

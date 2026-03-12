@@ -1044,8 +1044,8 @@ sampling_mask_table_generate :: proc "contextless" (pattern: [$N]int) -> (table:
 	}
 	mask: type_of(table[0])
 	for p, i in transposed {
-		mask    |= { p, }
-		table[i] = mask
+		mask         |= { p, }
+		table[15 - i] = mask
 	}
 	return
 }
@@ -1105,8 +1105,12 @@ render_shape_coverage_mask :: proc(
 				x_off := sampling_pattern[N - 1 - y_sample]
 				start := ((intersections[current_intersection + 0] - shape.min.x) * scale.x + 0.5) * N - f32(x_off)
 				end   := ((intersections[current_intersection + 1] - shape.min.x) * scale.x - 0.5) * N - f32(x_off)
-				for x in max(int(start), 0) ..< min(int(end), w * N) {
-					scanline[x / N] |= { N - 1 - y_sample, }
+
+				x_start := int(math.round(start / N))
+				x_end   := int(math.round(end   / N))
+
+				for x in max(x_start, 0) ..= min(x_end, w - 1) {
+					scanline[x] |= { N - 1 - y_sample, }
 				}
 
 				current_intersection += 2
